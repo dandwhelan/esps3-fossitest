@@ -140,29 +140,125 @@ display:
   dc_pin: GPIO9
   reset_pin: GPIO14
   rotation: 90
-  data_rate: 4MHz
+  data_rate: 20MHz
   invert_colors: false
   update_interval: 5s
-  show_test_card: true
+
+  lambda: |-
+    // =============================================
+    //  CLEAR BACKGROUND
+    // =============================================
+    it.fill(id(c_black));
+
+    // =============================================
+    //  TOP STATUS BAR
+    // =============================================
+    if (id(dashboard_voltage).has_state()) {
+      it.printf(5, 2, id(font_sm), id(c_white), "Remote: %.1fV", id(dashboard_voltage).state);
+    }
+
+    if (id(fbot_connected).state) {
+      it.print(315, 2, id(font_sm), id(c_green), TextAlign::TOP_RIGHT, "BLE: ON");
+    } else {
+      it.print(315, 2, id(font_sm), id(c_fossibot_orange), TextAlign::TOP_RIGHT, "SCANNING...");
+      it.print(160, 120, id(font_md), id(c_white), TextAlign::CENTER, "Waiting for Fossibot...");
+      return;  // Nothing else to draw until connected
+    }
+
+    // =============================================
+    //  MAIN DASHBOARD  (only when BLE is connected)
+    // =============================================
+
+    // --- Battery Percentage (centre circle) ---
+    it.circle(160, 105, 55, id(c_grid));
+
+    if (id(fbot_bat).has_state()) {
+      int bat = (int)id(fbot_bat).state;
+      Color bat_color = id(c_white);
+      if (bat < 20) bat_color = Color(255, 0, 0);
+      it.printf(160, 105, id(font_lg), bat_color, TextAlign::CENTER, "%d%%", bat);
+    }
+
+    // --- Power flow (left / right) ---
+    it.print(40, 85, id(font_sm), id(c_grid), TextAlign::CENTER, "INPUT");
+    if (id(fbot_in).has_state()) {
+      it.printf(40, 110, id(font_md), id(c_green), TextAlign::CENTER, "%.0fW", id(fbot_in).state);
+    }
+
+    it.print(280, 85, id(font_sm), id(c_grid), TextAlign::CENTER, "OUTPUT");
+    if (id(fbot_out).has_state()) {
+      it.printf(280, 110, id(font_md), id(c_fossibot_orange), TextAlign::CENTER, "%.0fW", id(fbot_out).state);
+    }
+
+    // =============================================
+    //  TOUCH BUTTON BAR  (bottom 60 px)
+    // =============================================
+    uint32_t now = millis();
+    int btn_y = 180;
+    int btn_h = 60;
+    int btn_w = 104;
+    int gap   = 4;
+
+    // --- Pulse helper: cosine wave x linear decay over 1.5 s ---
+    auto calc_pulse = [](uint32_t press_time, uint32_t now_ms) -> float {
+      if (press_time == 0) return 0.0f;
+      uint32_t elapsed = now_ms - press_time;
+      if (elapsed > 1500) return 0.0f;
+      float t = (float)elapsed / 1500.0f;
+      float decay = 1.0f - t;
+      float wave  = (cosf(t * 3.14159f * 6.0f) + 1.0f) / 2.0f;
+      return decay * wave;
+    };
+
+    // --- Button renderer ---
+    auto draw_button = [&](int x, int y, int w, int h,
+                           const char* label, bool state, float pulse) {
+      if (state) {
+        int g = (int)(25 + pulse * 100);
+        it.filled_rectangle(x, y, w, h, Color(0, g, 0));
+      } else {
+        int v = (int)(18 + pulse * 70);
+        it.filled_rectangle(x, y, w, h, Color(v, v, v));
+      }
+
+      Color bc = state
+        ? Color(0, (int)(130 + pulse * 125), 0)
+        : Color((int)(55 + pulse * 90), (int)(55 + pulse * 90), (int)(55 + pulse * 90));
+      it.rectangle(x, y, w, h, bc);
+      if (state) it.rectangle(x + 1, y + 1, w - 2, h - 2, bc);
+
+      Color tc = state
+        ? Color(0, (int)(200 + pulse * 55), 0)
+        : Color((int)(150 + pulse * 105), (int)(150 + pulse * 105), (int)(150 + pulse * 105));
+      it.print(x + w / 2, y + h / 2, id(font_md), tc, TextAlign::CENTER, label);
+    };
+
+    float p_ac  = calc_pulse(id(ac_press_time),  now);
+    float p_usb = calc_pulse(id(usb_press_time), now);
+    float p_dc  = calc_pulse(id(dc_press_time),  now);
+
+    draw_button(0,                 btn_y, btn_w, btn_h, "AC",  id(sw_ac).state,  p_ac);
+    draw_button(btn_w + gap,       btn_y, btn_w, btn_h, "USB", id(sw_usb).state, p_usb);
+    draw_button(2 * (btn_w + gap), btn_y, btn_w, btn_h, "DC",  id(sw_dc).state,  p_dc);
 
 # --- HARDWARE: TOUCHSCREEN ---
-# touchscreen:
-#   platform: xpt2046
-#   id: my_touch
-#   spi_id: bus_a
-#   cs_pin: GPIO6
-#   interrupt_pin: GPIO7
-#   update_interval: 50ms
-#   threshold: 400
-#   calibration:
-#     x_min: 300
-#     x_max: 3800
-#     y_min: 200
-#     y_max: 3700
-#   transform:
-#     swap_xy: true
-#     mirror_x: false
-#     mirror_y: true
+touchscreen:
+  platform: xpt2046
+  id: my_touch
+  spi_id: bus_a
+  cs_pin: GPIO6
+  interrupt_pin: GPIO7
+  update_interval: 50ms
+  threshold: 400
+  calibration:
+    x_min: 300
+    x_max: 3800
+    y_min: 200
+    y_max: 3700
+  transform:
+    swap_xy: true
+    mirror_x: false
+    mirror_y: true
 
 # --- HARDWARE: BLUETOOTH ---
 esp32_ble_tracker:
@@ -208,62 +304,62 @@ binary_sensor:
   # Each button: toggle the fbot switch, stamp the press time, force a
   # display refresh.  Gated on BLE connected — no action when offline.
 
-  # - platform: touchscreen
-  #   name: "Touch AC"
-  #   touchscreen_id: my_touch
-  #   x_min: 0
-  #   x_max: 106
-  #   y_min: 180
-  #   y_max: 240
-  #   on_press:
-  #     then:
-  #       - if:
-  #           condition:
-  #             binary_sensor.is_on: fbot_connected
-  #           then:
-  #             - switch.toggle: sw_ac
-  #             - globals.set:
-  #                 id: ac_press_time
-  #                 value: !lambda 'return millis();'
-  #             - component.update: tft_display
+  - platform: touchscreen
+    name: "Touch AC"
+    touchscreen_id: my_touch
+    x_min: 0
+    x_max: 106
+    y_min: 180
+    y_max: 240
+    on_press:
+      then:
+        - if:
+            condition:
+              binary_sensor.is_on: fbot_connected
+            then:
+              - switch.toggle: sw_ac
+              - globals.set:
+                  id: ac_press_time
+                  value: !lambda 'return millis();'
+              - component.update: tft_display
 
-  # - platform: touchscreen
-  #   name: "Touch USB"
-  #   touchscreen_id: my_touch
-  #   x_min: 107
-  #   x_max: 213
-  #   y_min: 180
-  #   y_max: 240
-  #   on_press:
-  #     then:
-  #       - if:
-  #           condition:
-  #             binary_sensor.is_on: fbot_connected
-  #           then:
-  #             - switch.toggle: sw_usb
-  #             - globals.set:
-  #                 id: usb_press_time
-  #                 value: !lambda 'return millis();'
-  #             - component.update: tft_display
+  - platform: touchscreen
+    name: "Touch USB"
+    touchscreen_id: my_touch
+    x_min: 107
+    x_max: 213
+    y_min: 180
+    y_max: 240
+    on_press:
+      then:
+        - if:
+            condition:
+              binary_sensor.is_on: fbot_connected
+            then:
+              - switch.toggle: sw_usb
+              - globals.set:
+                  id: usb_press_time
+                  value: !lambda 'return millis();'
+              - component.update: tft_display
 
-  # - platform: touchscreen
-  #   name: "Touch DC"
-  #   touchscreen_id: my_touch
-  #   x_min: 214
-  #   x_max: 320
-  #   y_min: 180
-  #   y_max: 240
-  #   on_press:
-  #     then:
-  #       - if:
-  #           condition:
-  #             binary_sensor.is_on: fbot_connected
-  #           then:
-  #             - switch.toggle: sw_dc
-  #             - globals.set:
-  #                 id: dc_press_time
-  #                 value: !lambda 'return millis();'
-  #             - component.update: tft_display
+  - platform: touchscreen
+    name: "Touch DC"
+    touchscreen_id: my_touch
+    x_min: 214
+    x_max: 320
+    y_min: 180
+    y_max: 240
+    on_press:
+      then:
+        - if:
+            condition:
+              binary_sensor.is_on: fbot_connected
+            then:
+              - switch.toggle: sw_dc
+              - globals.set:
+                  id: dc_press_time
+                  value: !lambda 'return millis();'
+              - component.update: tft_display
 
 # --- NUMBER CONTROLS (Fossibot Settings) ---
 number:
