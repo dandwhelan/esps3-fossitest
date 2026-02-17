@@ -140,9 +140,9 @@ display:
   dc_pin: GPIO9
   reset_pin: GPIO14
   rotation: 90
-  data_rate: 40MHz
-  invert_colors: true
-  update_interval: 5s
+  data_rate: 20MHz
+  invert_colors: false
+  update_interval: 1s
 
   lambda: |-
     // =============================================
