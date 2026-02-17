@@ -1,0 +1,381 @@
+esphome:
+  name: fossibot-remote-v2
+  friendly_name: Fossibot Remote V2
+  platformio_options:
+    board_build.arduino.memory_type: qio_opi
+    board_build.flash_mode: qio
+    board_build.psram_type: opi
+
+esp32:
+  board: esp32-s3-devkitc-1
+  variant: esp32s3
+  flash_size: 16MB
+  framework:
+    type: arduino  # Solves the "screen_timeout" compile error
+
+# Enable Home Assistant API
+api:
+  encryption:
+    key: "FYkj/2TxDQMFONe9ykeUvRmfoTY2MfVJay3Pm3fOEd0="
+
+# Enable PSRAM for display buffer (required for ILI9341 + BLE + WiFi)
+psram:
+  mode: octal
+  speed: 80MHz
+
+ota:
+  platform: esphome
+  password: "ea0ae625bf4793e8a6acb3a5f56f0f08"
+
+logger:
+  level: DEBUG
+  baud_rate: 115200
+  hardware_uart: UART0
+  logs:
+    component: ERROR
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  power_save_mode: LIGHT
+
+  ap:
+    ssid: "Fossibot-Remote-V2"
+    password: "SxWBhL3B0EEE"
+
+captive_portal:
+
+external_components:
+  - source: github://dandwhelan/esp-fbot
+    refresh: 0s
+    components: [ fbot ]
+
+# --- GLOBALS FOR PULSE ANIMATION ---
+# Stores the millis() timestamp of the last button press for each output.
+# The display lambda reads these to calculate a decaying pulse glow.
+globals:
+  - id: ac_press_time
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+  - id: usb_press_time
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+  - id: dc_press_time
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+
+# --- SMART ANIMATION REFRESH ---
+# Normal display refresh is 1 s (saves power / SPI bus).
+# This interval forces 10 fps updates ONLY while a pulse animation is active.
+interval:
+  - interval: 100ms
+    then:
+      - if:
+          condition:
+            lambda: |-
+              uint32_t now = millis();
+              return (now - id(ac_press_time)  < 1500) ||
+                     (now - id(usb_press_time) < 1500) ||
+                     (now - id(dc_press_time)  < 1500);
+          then:
+            - component.update: tft_display
+
+# --- HARDWARE: SHARED SPI BUS ---
+spi:
+  id: bus_a
+  clk_pin: GPIO12
+  mosi_pin: GPIO11
+  miso_pin: GPIO13
+
+# --- FONTS ---
+font:
+  - file: "gfonts://Roboto"
+    id: font_sm
+    size: 16
+
+  - file: "gfonts://Roboto"
+    id: font_md
+    size: 24
+
+  - file:
+      type: gfonts
+      family: Roboto
+      weight: 700
+    id: font_lg
+    size: 60
+
+# --- COLORS ---
+color:
+  - id: c_white
+    red: 100%
+    green: 100%
+    blue: 100%
+  - id: c_black
+    red: 0%
+    green: 0%
+    blue: 0%
+  - id: c_fossibot_orange
+    red: 100%
+    green: 60%
+    blue: 0%
+  - id: c_grid
+    red: 30%
+    green: 30%
+    blue: 30%
+  - id: c_green
+    red: 0%
+    green: 100%
+    blue: 0%
+
+# --- HARDWARE: DISPLAY ---
+display:
+  platform: ili9xxx
+  id: tft_display
+  model: ILI9341
+  spi_id: bus_a
+  cs_pin: GPIO10
+  dc_pin: GPIO9
+  reset_pin: GPIO14
+  rotation: 90
+  data_rate: 40MHz
+  invert_colors: true
+  update_interval: 5s
+
+  lambda: |-
+    // =============================================
+    //  CLEAR BACKGROUND
+    // =============================================
+    it.fill(id(c_black));
+
+    // =============================================
+    //  TOP STATUS BAR
+    // =============================================
+    if (id(dashboard_voltage).has_state()) {
+      it.printf(5, 2, id(font_sm), id(c_white), "Remote: %.1fV", id(dashboard_voltage).state);
+    }
+
+    if (id(fbot_connected).state) {
+      it.print(315, 2, id(font_sm), id(c_green), TextAlign::TOP_RIGHT, "BLE: ON");
+    } else {
+      it.print(315, 2, id(font_sm), id(c_fossibot_orange), TextAlign::TOP_RIGHT, "SCANNING...");
+      it.print(160, 120, id(font_md), id(c_white), TextAlign::CENTER, "Waiting for Fossibot...");
+      return;  // Nothing else to draw until connected
+    }
+
+    // =============================================
+    //  MAIN DASHBOARD  (only when BLE is connected)
+    // =============================================
+
+    // --- Battery Percentage (centre circle) ---
+    it.circle(160, 105, 55, id(c_grid));
+
+    if (id(fbot_bat).has_state()) {
+      int bat = (int)id(fbot_bat).state;
+      Color bat_color = id(c_white);
+      if (bat < 20) bat_color = Color(255, 0, 0);
+      it.printf(160, 105, id(font_lg), bat_color, TextAlign::CENTER, "%d%%", bat);
+    }
+
+    // --- Power flow (left / right) ---
+    it.print(40, 85, id(font_sm), id(c_grid), TextAlign::CENTER, "INPUT");
+    if (id(fbot_in).has_state()) {
+      it.printf(40, 110, id(font_md), id(c_green), TextAlign::CENTER, "%.0fW", id(fbot_in).state);
+    }
+
+    it.print(280, 85, id(font_sm), id(c_grid), TextAlign::CENTER, "OUTPUT");
+    if (id(fbot_out).has_state()) {
+      it.printf(280, 110, id(font_md), id(c_fossibot_orange), TextAlign::CENTER, "%.0fW", id(fbot_out).state);
+    }
+
+    // =============================================
+    //  TOUCH BUTTON BAR  (bottom 60 px)
+    // =============================================
+    uint32_t now = millis();
+    int btn_y = 180;
+    int btn_h = 60;
+    int btn_w = 104;
+    int gap   = 4;
+
+    // --- Pulse helper: cosine wave × linear decay over 1.5 s ---
+    //     Starts at full brightness on touch, fades with 3 oscillations.
+    auto calc_pulse = [](uint32_t press_time, uint32_t now_ms) -> float {
+      if (press_time == 0) return 0.0f;
+      uint32_t elapsed = now_ms - press_time;
+      if (elapsed > 1500) return 0.0f;
+      float t = (float)elapsed / 1500.0f;
+      float decay = 1.0f - t;
+      float wave  = (cosf(t * 3.14159f * 6.0f) + 1.0f) / 2.0f;
+      return decay * wave;
+    };
+
+    // --- Button renderer ---
+    auto draw_button = [&](int x, int y, int w, int h,
+                           const char* label, bool state, float pulse) {
+      // Background
+      if (state) {
+        int g = (int)(25 + pulse * 100);
+        it.filled_rectangle(x, y, w, h, Color(0, g, 0));
+      } else {
+        int v = (int)(18 + pulse * 70);
+        it.filled_rectangle(x, y, w, h, Color(v, v, v));
+      }
+
+      // Border (double-thick when ON)
+      Color bc = state
+        ? Color(0, (int)(130 + pulse * 125), 0)
+        : Color((int)(55 + pulse * 90), (int)(55 + pulse * 90), (int)(55 + pulse * 90));
+      it.rectangle(x, y, w, h, bc);
+      if (state) it.rectangle(x + 1, y + 1, w - 2, h - 2, bc);
+
+      // Label
+      Color tc = state
+        ? Color(0, (int)(200 + pulse * 55), 0)
+        : Color((int)(150 + pulse * 105), (int)(150 + pulse * 105), (int)(150 + pulse * 105));
+      it.print(x + w / 2, y + h / 2, id(font_md), tc, TextAlign::CENTER, label);
+    };
+
+    float p_ac  = calc_pulse(id(ac_press_time),  now);
+    float p_usb = calc_pulse(id(usb_press_time), now);
+    float p_dc  = calc_pulse(id(dc_press_time),  now);
+
+    draw_button(0,                 btn_y, btn_w, btn_h, "AC",  id(sw_ac).state,  p_ac);
+    draw_button(btn_w + gap,       btn_y, btn_w, btn_h, "USB", id(sw_usb).state, p_usb);
+    draw_button(2 * (btn_w + gap), btn_y, btn_w, btn_h, "DC",  id(sw_dc).state,  p_dc);
+
+# --- HARDWARE: TOUCHSCREEN ---
+# touchscreen:
+#   platform: xpt2046
+#   id: my_touch
+#   spi_id: bus_a
+#   cs_pin: GPIO6
+#   interrupt_pin: GPIO7
+#   update_interval: 50ms
+#   threshold: 400
+#   calibration:
+#     x_min: 300
+#     x_max: 3800
+#     y_min: 200
+#     y_max: 3700
+#   transform:
+#     swap_xy: true
+#     mirror_x: false
+#     mirror_y: true
+
+# --- HARDWARE: BLUETOOTH ---
+esp32_ble_tracker:
+  scan_parameters:
+    interval: 2000ms
+    window: 200ms
+    duration: 5min
+    active: true
+
+ble_client:
+  - mac_address: "DC:1E:D5:E4:07:1E"
+    id: fossibot_ble
+
+fbot:
+  id: my_fbot
+  ble_client_id: fossibot_ble
+  polling_interval: 5s
+  settings_polling_interval: 60s
+
+# --- SENSORS ---
+sensor:
+  - platform: adc
+    pin: GPIO1
+    attenuation: 12db
+    name: "Dashboard Voltage"
+    id: dashboard_voltage
+    filters:
+      - multiply: 2.0
+
+  - platform: fbot
+    fbot_id: my_fbot
+    battery_level: { name: "Battery", id: fbot_bat }
+    input_power:   { name: "Input",   id: fbot_in }
+    output_power:  { name: "Output",  id: fbot_out }
+
+# --- BINARY SENSORS ---
+binary_sensor:
+  - platform: fbot
+    fbot_id: my_fbot
+    connected: { name: "Connected", id: fbot_connected }
+
+  # --- TOUCH BUTTONS (display-coordinate regions) ---
+  # Each button: toggle the fbot switch, stamp the press time, force a
+  # display refresh.  Gated on BLE connected — no action when offline.
+
+  # - platform: touchscreen
+  #   name: "Touch AC"
+  #   touchscreen_id: my_touch
+  #   x_min: 0
+  #   x_max: 106
+  #   y_min: 180
+  #   y_max: 240
+  #   on_press:
+  #     then:
+  #       - if:
+  #           condition:
+  #             binary_sensor.is_on: fbot_connected
+  #           then:
+  #             - switch.toggle: sw_ac
+  #             - globals.set:
+  #                 id: ac_press_time
+  #                 value: !lambda 'return millis();'
+  #             - component.update: tft_display
+
+  # - platform: touchscreen
+  #   name: "Touch USB"
+  #   touchscreen_id: my_touch
+  #   x_min: 107
+  #   x_max: 213
+  #   y_min: 180
+  #   y_max: 240
+  #   on_press:
+  #     then:
+  #       - if:
+  #           condition:
+  #             binary_sensor.is_on: fbot_connected
+  #           then:
+  #             - switch.toggle: sw_usb
+  #             - globals.set:
+  #                 id: usb_press_time
+  #                 value: !lambda 'return millis();'
+  #             - component.update: tft_display
+
+  # - platform: touchscreen
+  #   name: "Touch DC"
+  #   touchscreen_id: my_touch
+  #   x_min: 214
+  #   x_max: 320
+  #   y_min: 180
+  #   y_max: 240
+  #   on_press:
+  #     then:
+  #       - if:
+  #           condition:
+  #             binary_sensor.is_on: fbot_connected
+  #           then:
+  #             - switch.toggle: sw_dc
+  #             - globals.set:
+  #                 id: dc_press_time
+  #                 value: !lambda 'return millis();'
+  #             - component.update: tft_display
+
+# --- NUMBER CONTROLS (Fossibot Settings) ---
+number:
+  - platform: fbot
+    fbot_id: my_fbot
+    threshold_charge:    { name: "Charge Threshold" }
+    threshold_discharge: { name: "Discharge Threshold" }
+
+# --- SWITCHES ---
+switch:
+  - platform: fbot
+    fbot_id: my_fbot
+    ac:  { name: "AC",  id: sw_ac }
+    usb: { name: "USB", id: sw_usb }
+    dc:  { name: "DC",  id: sw_dc }
