@@ -257,8 +257,8 @@ touchscreen:
     y_max: 3700
   transform:
     swap_xy: true
-    mirror_x: false
-    mirror_y: true
+    mirror_x: true
+    mirror_y: false
 
 # --- HARDWARE: BLUETOOTH ---
 esp32_ble_tracker:
