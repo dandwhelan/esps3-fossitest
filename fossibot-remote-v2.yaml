@@ -5,20 +5,21 @@ esphome:
     board_build.arduino.memory_type: qio_opi
     board_build.flash_mode: qio
     board_build.psram_type: opi
+  on_boot:
+    then:
+      - lambda: 'id(last_touch_ms) = millis();'
 
 esp32:
   board: esp32-s3-devkitc-1
   variant: esp32s3
   flash_size: 16MB
   framework:
-    type: arduino  # Solves the "screen_timeout" compile error
+    type: arduino
 
-# Enable Home Assistant API
 api:
   encryption:
     key: "FYkj/2TxDQMFONe9ykeUvRmfoTY2MfVJay3Pm3fOEd0="
 
-# Enable PSRAM for display buffer (required for ILI9341 + BLE + WiFi)
 psram:
   mode: octal
   speed: 80MHz
@@ -50,9 +51,7 @@ external_components:
     refresh: 0s
     components: [ fbot ]
 
-# --- GLOBALS FOR PULSE ANIMATION ---
-# Stores the millis() timestamp of the last button press for each output.
-# The display lambda reads these to calculate a decaying pulse glow.
+# --- GLOBALS ---
 globals:
   - id: ac_press_time
     type: uint32_t
@@ -70,10 +69,22 @@ globals:
     type: uint32_t
     restore_value: no
     initial_value: '0'
+  - id: fossi_menu
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  - id: screen_state
+    type: int
+    restore_value: no
+    initial_value: '2'
+  - id: last_tap_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
 
-# --- SMART ANIMATION REFRESH ---
-# Normal display refresh is 5 s. Forces 10 fps updates only while pulse active.
+# --- INTERVALS ---
 interval:
+  # Pulse animation refresh (10 fps while active)
   - interval: 100ms
     then:
       - if:
@@ -86,32 +97,48 @@ interval:
           then:
             - component.update: tft_display
 
-  # --- BACKLIGHT TIMEOUT ---
-  # Dims to 20% after 30 s idle, fully off after 60 s idle.
+  # Backlight timeout — direct PWM, only fires on state change
   - interval: 5s
     then:
       - lambda: |-
           uint32_t idle = millis() - id(last_touch_ms);
-          if (idle > 60000) {
-            auto call = id(backlight).turn_off();
-            call.set_transition_length(1000);
-            call.perform();
-          } else if (idle > 30000) {
-            auto call = id(backlight).turn_on();
-            call.set_brightness(0.15f);
-            call.set_transition_length(2000);
-            call.perform();
+          int target = 2;
+          if (idle > 60000) target = 0;
+          else if (idle > 30000) target = 1;
+          if (target != id(screen_state)) {
+            id(screen_state) = target;
+            if (target == 0) {
+              id(backlight_pwm).set_level(0.0f);
+            } else if (target == 1) {
+              id(backlight_pwm).set_level(0.15f);
+            }
           }
 
+  # Battery LED — smooth red→orange→yellow→green gradient
+  - interval: 10s
+    then:
+      - lambda: |-
+          if (!id(fbot_bat).has_state() || !id(fbot_connected).state) {
+            auto call = id(status_led).turn_off();
+            call.perform();
+            return;
+          }
+          float pct = id(fbot_bat).state / 100.0f;
+          float r = pct < 0.5f ? 1.0f : 2.0f * (1.0f - pct);
+          float g = pct > 0.5f ? 1.0f : 2.0f * pct;
+          auto call = id(status_led).turn_on();
+          call.set_brightness(0.15f);
+          call.set_rgb(r, g, 0.0f);
+          call.perform();
+
 # --- BACKLIGHT PWM OUTPUT ---
-# Wire the display's LED/BL pin to GPIO15 instead of directly to 3.3V.
 output:
   - platform: ledc
     pin: GPIO15
     id: backlight_pwm
     frequency: 1000Hz
 
-# Exposes backlight as a dimmable light in Home Assistant.
+# --- LIGHTS ---
 light:
   - platform: monochromatic
     output: backlight_pwm
@@ -119,6 +146,15 @@ light:
     name: "Display Backlight"
     default_transition_length: 500ms
     restore_mode: ALWAYS_ON
+
+  - platform: esp32_rmt_led_strip
+    id: status_led
+    pin: GPIO48
+    num_leds: 1
+    rmt_channel: 0
+    chipset: WS2812
+    rgb_order: GRB
+    name: "Battery LED"
 
 # --- HARDWARE: SHARED SPI BUS ---
 spi:
@@ -182,10 +218,103 @@ display:
   update_interval: 5s
 
   lambda: |-
-    // =============================================
-    //  CLEAR BACKGROUND
-    // =============================================
     it.fill(id(c_black));
+
+    // =============================================
+    //  FOSSIBOT SETTINGS SCREEN
+    // =============================================
+    if (id(fossi_menu)) {
+      // --- Header bar ---
+      it.filled_rectangle(0, 0, 320, 24, Color(40, 40, 40));
+      it.print(5, 4, id(font_sm), id(c_white), "FOSSIBOT SETTINGS");
+      it.print(315, 4, id(font_sm), id(c_fossibot_orange), TextAlign::TOP_RIGHT, "< BACK");
+      it.line(0, 24, 320, 24, id(c_grid));
+
+      // --- Toggle button renderer ---
+      auto draw_toggle = [&](int x, int y, int w, int h, bool state) {
+        Color bg = state ? Color(0, 80, 0) : Color(50, 50, 50);
+        Color bc = state ? Color(0, 180, 0) : Color(100, 100, 100);
+        Color tc = state ? Color(0, 220, 0) : Color(160, 160, 160);
+        it.filled_rectangle(x, y, w, h, bg);
+        it.rectangle(x, y, w, h, bc);
+        it.print(x + w/2, y + h/2, id(font_sm), tc, TextAlign::CENTER,
+                 state ? "ON" : "OFF");
+      };
+
+      // --- Nav/adjust button renderer ---
+      auto draw_nav = [&](int x, int y, int w, int h, const char* label) {
+        it.filled_rectangle(x, y, w, h, Color(40, 40, 80));
+        it.rectangle(x, y, w, h, Color(80, 80, 160));
+        it.print(x + w/2, y + h/2, id(font_sm), id(c_white), TextAlign::CENTER, label);
+      };
+
+      int rh = 30;
+      int by = 28;
+
+      // Row 1: KEY SOUND
+      it.print(5, by + 7, id(font_sm), id(c_white), "KEY SOUND");
+      draw_toggle(220, by + 3, 96, 24, id(sw_key_sound).state);
+
+      // Row 2: SILENT CHG
+      by += rh;
+      it.print(5, by + 7, id(font_sm), id(c_white), "SILENT CHG");
+      draw_toggle(220, by + 3, 96, 24, id(sw_ac_silent).state);
+
+      // Row 3: LIGHT
+      by += rh;
+      it.print(5, by + 7, id(font_sm), id(c_white), "LIGHT");
+      draw_toggle(220, by + 3, 96, 24, id(sw_light).state);
+
+      // Row 4: LIGHT MODE
+      by += rh;
+      it.print(5, by + 7, id(font_sm), id(c_white), "LIGHT MODE");
+      draw_nav(185, by + 3, 30, 24, "<");
+      if (id(sel_light_mode).has_state())
+        it.print(250, by + 7, id(font_sm), id(c_fossibot_orange),
+                 TextAlign::TOP_CENTER, id(sel_light_mode).state.c_str());
+      else
+        it.print(250, by + 7, id(font_sm), id(c_grid),
+                 TextAlign::TOP_CENTER, "---");
+      draw_nav(286, by + 3, 30, 24, ">");
+
+      // Row 5: CHG LIMIT
+      by += rh;
+      it.print(5, by + 7, id(font_sm), id(c_white), "CHG LIMIT");
+      draw_nav(185, by + 3, 30, 24, "<");
+      if (id(sel_charge_limit).has_state())
+        it.print(250, by + 7, id(font_sm), id(c_fossibot_orange),
+                 TextAlign::TOP_CENTER, id(sel_charge_limit).state.c_str());
+      else
+        it.print(250, by + 7, id(font_sm), id(c_grid),
+                 TextAlign::TOP_CENTER, "---");
+      draw_nav(286, by + 3, 30, 24, ">");
+
+      // Row 6: CHG THRESH
+      by += rh;
+      it.print(5, by + 7, id(font_sm), id(c_white), "CHG THRESH");
+      draw_nav(185, by + 3, 30, 24, "-");
+      if (id(num_chg_thresh).has_state())
+        it.printf(250, by + 7, id(font_sm), id(c_fossibot_orange),
+                  TextAlign::TOP_CENTER, "%d%%", (int)id(num_chg_thresh).state);
+      else
+        it.print(250, by + 7, id(font_sm), id(c_grid),
+                 TextAlign::TOP_CENTER, "---");
+      draw_nav(286, by + 3, 30, 24, "+");
+
+      // Row 7: DIS THRESH
+      by += rh;
+      it.print(5, by + 7, id(font_sm), id(c_white), "DIS THRESH");
+      draw_nav(185, by + 3, 30, 24, "-");
+      if (id(num_dis_thresh).has_state())
+        it.printf(250, by + 7, id(font_sm), id(c_fossibot_orange),
+                  TextAlign::TOP_CENTER, "%d%%", (int)id(num_dis_thresh).state);
+      else
+        it.print(250, by + 7, id(font_sm), id(c_grid),
+                 TextAlign::TOP_CENTER, "---");
+      draw_nav(286, by + 3, 30, 24, "+");
+
+      return;
+    }
 
     // =============================================
     //  TOP STATUS BAR
@@ -199,7 +328,7 @@ display:
     } else {
       it.print(315, 2, id(font_sm), id(c_fossibot_orange), TextAlign::TOP_RIGHT, "SCANNING...");
       it.print(160, 120, id(font_md), id(c_white), TextAlign::CENTER, "Waiting for Fossibot...");
-      return;  // Nothing else to draw until connected
+      return;
     }
 
     // =============================================
@@ -228,15 +357,14 @@ display:
     }
 
     // =============================================
-    //  TOUCH BUTTON BAR  (bottom 60 px)
+    //  4-BUTTON BAR  (bottom 60 px)
     // =============================================
     uint32_t now = millis();
     int btn_y = 180;
     int btn_h = 60;
-    int btn_w = 104;
+    int btn_w = 77;
     int gap   = 4;
 
-    // --- Pulse helper: cosine wave x linear decay over 1.5 s ---
     auto calc_pulse = [](uint32_t press_time, uint32_t now_ms) -> float {
       if (press_time == 0) return 0.0f;
       uint32_t elapsed = now_ms - press_time;
@@ -247,7 +375,6 @@ display:
       return decay * wave;
     };
 
-    // --- Button renderer ---
     auto draw_button = [&](int x, int y, int w, int h,
                            const char* label, bool state, float pulse) {
       if (state) {
@@ -278,6 +405,13 @@ display:
     draw_button(btn_w + gap,       btn_y, btn_w, btn_h, "USB", id(sw_usb).state, p_usb);
     draw_button(2 * (btn_w + gap), btn_y, btn_w, btn_h, "DC",  id(sw_dc).state,  p_dc);
 
+    // --- FOSSI settings button (orange theme) ---
+    int fx = 3 * (btn_w + gap);
+    it.filled_rectangle(fx, btn_y, btn_w, btn_h, Color(40, 24, 0));
+    it.rectangle(fx, btn_y, btn_w, btn_h, id(c_fossibot_orange));
+    it.print(fx + btn_w / 2, btn_y + btn_h / 2, id(font_md),
+             id(c_fossibot_orange), TextAlign::CENTER, "SET");
+
 # --- HARDWARE: TOUCHSCREEN ---
 touchscreen:
   platform: xpt2046
@@ -297,17 +431,24 @@ touchscreen:
     mirror_x: true
     mirror_y: true
   on_touch:
-    - globals.set:
-        id: last_touch_ms
-        value: !lambda 'return millis();'
-    - if:
-        condition:
-          lambda: 'return !id(backlight).current_values.is_on();'
-        then:
-          - light.turn_on:
-              id: backlight
-              brightness: 100%
-              transition_length: 300ms
+    - lambda: |-
+        uint32_t now = millis();
+        id(last_touch_ms) = now;
+        if (id(screen_state) == 0) {
+          // Screen off: require double-tap to wake
+          uint32_t gap = now - id(last_tap_ms);
+          if (gap > 100 && gap < 500) {
+            id(screen_state) = 2;
+            id(backlight_pwm).set_level(1.0f);
+            id(last_tap_ms) = 0;
+          } else {
+            id(last_tap_ms) = now;
+          }
+        } else if (id(screen_state) == 1) {
+          // Dim: single touch wakes
+          id(screen_state) = 2;
+          id(backlight_pwm).set_level(1.0f);
+        }
 
 # --- HARDWARE: BLUETOOTH ---
 esp32_ble_tracker:
@@ -349,22 +490,20 @@ binary_sensor:
     fbot_id: my_fbot
     connected: { name: "Connected", id: fbot_connected }
 
-  # --- TOUCH BUTTONS (display-coordinate regions) ---
-  # Each button: toggle the fbot switch, stamp the press time, force a
-  # display refresh.  Gated on BLE connected — no action when offline.
+  # ===== MAIN DASHBOARD BUTTONS (gated: screen on + menu closed) =====
 
   - platform: touchscreen
     name: "Touch AC"
     touchscreen_id: my_touch
     x_min: 0
-    x_max: 106
+    x_max: 77
     y_min: 180
     y_max: 240
     on_press:
       then:
         - if:
             condition:
-              binary_sensor.is_on: fbot_connected
+              lambda: 'return id(screen_state) == 2 && !id(fossi_menu) && id(fbot_connected).state;'
             then:
               - switch.toggle: sw_ac
               - globals.set:
@@ -375,15 +514,15 @@ binary_sensor:
   - platform: touchscreen
     name: "Touch USB"
     touchscreen_id: my_touch
-    x_min: 107
-    x_max: 213
+    x_min: 81
+    x_max: 158
     y_min: 180
     y_max: 240
     on_press:
       then:
         - if:
             condition:
-              binary_sensor.is_on: fbot_connected
+              lambda: 'return id(screen_state) == 2 && !id(fossi_menu) && id(fbot_connected).state;'
             then:
               - switch.toggle: sw_usb
               - globals.set:
@@ -394,15 +533,15 @@ binary_sensor:
   - platform: touchscreen
     name: "Touch DC"
     touchscreen_id: my_touch
-    x_min: 214
-    x_max: 320
+    x_min: 162
+    x_max: 239
     y_min: 180
     y_max: 240
     on_press:
       then:
         - if:
             condition:
-              binary_sensor.is_on: fbot_connected
+              lambda: 'return id(screen_state) == 2 && !id(fossi_menu) && id(fbot_connected).state;'
             then:
               - switch.toggle: sw_dc
               - globals.set:
@@ -410,17 +549,276 @@ binary_sensor:
                   value: !lambda 'return millis();'
               - component.update: tft_display
 
-# --- NUMBER CONTROLS (Fossibot Settings) ---
+  - platform: touchscreen
+    name: "Touch FOSSI"
+    touchscreen_id: my_touch
+    x_min: 243
+    x_max: 320
+    y_min: 180
+    y_max: 240
+    on_press:
+      then:
+        - if:
+            condition:
+              lambda: 'return id(screen_state) == 2 && !id(fossi_menu);'
+            then:
+              - globals.set:
+                  id: fossi_menu
+                  value: 'true'
+              - component.update: tft_display
+
+  # ===== SETTINGS MENU BUTTONS (gated: screen on + menu open) =====
+
+  - platform: touchscreen
+    name: "Touch Back"
+    touchscreen_id: my_touch
+    x_min: 220
+    x_max: 320
+    y_min: 0
+    y_max: 24
+    on_press:
+      then:
+        - if:
+            condition:
+              lambda: 'return id(screen_state) == 2 && id(fossi_menu);'
+            then:
+              - globals.set:
+                  id: fossi_menu
+                  value: 'false'
+              - component.update: tft_display
+
+  # Row 1: KEY SOUND toggle (y = 28+3=31 to 31+24=55)
+  - platform: touchscreen
+    name: "Touch Key Sound"
+    touchscreen_id: my_touch
+    x_min: 220
+    x_max: 316
+    y_min: 31
+    y_max: 55
+    on_press:
+      then:
+        - if:
+            condition:
+              lambda: 'return id(screen_state) == 2 && id(fossi_menu);'
+            then:
+              - switch.toggle: sw_key_sound
+              - component.update: tft_display
+
+  # Row 2: SILENT CHG toggle (y = 58+3=61 to 61+24=85)
+  - platform: touchscreen
+    name: "Touch Silent Chg"
+    touchscreen_id: my_touch
+    x_min: 220
+    x_max: 316
+    y_min: 61
+    y_max: 85
+    on_press:
+      then:
+        - if:
+            condition:
+              lambda: 'return id(screen_state) == 2 && id(fossi_menu);'
+            then:
+              - switch.toggle: sw_ac_silent
+              - component.update: tft_display
+
+  # Row 3: LIGHT toggle (y = 88+3=91 to 91+24=115)
+  - platform: touchscreen
+    name: "Touch Light"
+    touchscreen_id: my_touch
+    x_min: 220
+    x_max: 316
+    y_min: 91
+    y_max: 115
+    on_press:
+      then:
+        - if:
+            condition:
+              lambda: 'return id(screen_state) == 2 && id(fossi_menu);'
+            then:
+              - switch.toggle: sw_light
+              - component.update: tft_display
+
+  # Row 4: LIGHT MODE < (y = 118+3=121 to 121+24=145)
+  - platform: touchscreen
+    name: "Touch LtMode Prev"
+    touchscreen_id: my_touch
+    x_min: 185
+    x_max: 215
+    y_min: 121
+    y_max: 145
+    on_press:
+      then:
+        - if:
+            condition:
+              lambda: 'return id(screen_state) == 2 && id(fossi_menu);'
+            then:
+              - select.previous:
+                  id: sel_light_mode
+                  cycle: true
+              - component.update: tft_display
+
+  # Row 4: LIGHT MODE >
+  - platform: touchscreen
+    name: "Touch LtMode Next"
+    touchscreen_id: my_touch
+    x_min: 286
+    x_max: 316
+    y_min: 121
+    y_max: 145
+    on_press:
+      then:
+        - if:
+            condition:
+              lambda: 'return id(screen_state) == 2 && id(fossi_menu);'
+            then:
+              - select.next:
+                  id: sel_light_mode
+                  cycle: true
+              - component.update: tft_display
+
+  # Row 5: CHG LIMIT < (y = 148+3=151 to 151+24=175)
+  - platform: touchscreen
+    name: "Touch ChgLim Prev"
+    touchscreen_id: my_touch
+    x_min: 185
+    x_max: 215
+    y_min: 151
+    y_max: 175
+    on_press:
+      then:
+        - if:
+            condition:
+              lambda: 'return id(screen_state) == 2 && id(fossi_menu);'
+            then:
+              - select.previous:
+                  id: sel_charge_limit
+                  cycle: true
+              - component.update: tft_display
+
+  # Row 5: CHG LIMIT >
+  - platform: touchscreen
+    name: "Touch ChgLim Next"
+    touchscreen_id: my_touch
+    x_min: 286
+    x_max: 316
+    y_min: 151
+    y_max: 175
+    on_press:
+      then:
+        - if:
+            condition:
+              lambda: 'return id(screen_state) == 2 && id(fossi_menu);'
+            then:
+              - select.next:
+                  id: sel_charge_limit
+                  cycle: true
+              - component.update: tft_display
+
+  # Row 6: CHG THRESH - (y = 178+3=181 to 181+24=205)
+  - platform: touchscreen
+    name: "Touch ChgThr Down"
+    touchscreen_id: my_touch
+    x_min: 185
+    x_max: 215
+    y_min: 181
+    y_max: 205
+    on_press:
+      then:
+        - if:
+            condition:
+              lambda: 'return id(screen_state) == 2 && id(fossi_menu);'
+            then:
+              - number.set:
+                  id: num_chg_thresh
+                  value: !lambda |-
+                    float v = id(num_chg_thresh).state - 5.0f;
+                    return v < 10.0f ? 10.0f : v;
+              - component.update: tft_display
+
+  # Row 6: CHG THRESH +
+  - platform: touchscreen
+    name: "Touch ChgThr Up"
+    touchscreen_id: my_touch
+    x_min: 286
+    x_max: 316
+    y_min: 181
+    y_max: 205
+    on_press:
+      then:
+        - if:
+            condition:
+              lambda: 'return id(screen_state) == 2 && id(fossi_menu);'
+            then:
+              - number.set:
+                  id: num_chg_thresh
+                  value: !lambda |-
+                    float v = id(num_chg_thresh).state + 5.0f;
+                    return v > 100.0f ? 100.0f : v;
+              - component.update: tft_display
+
+  # Row 7: DIS THRESH - (y = 208+3=211 to 211+24=235)
+  - platform: touchscreen
+    name: "Touch DisThr Down"
+    touchscreen_id: my_touch
+    x_min: 185
+    x_max: 215
+    y_min: 211
+    y_max: 235
+    on_press:
+      then:
+        - if:
+            condition:
+              lambda: 'return id(screen_state) == 2 && id(fossi_menu);'
+            then:
+              - number.set:
+                  id: num_dis_thresh
+                  value: !lambda |-
+                    float v = id(num_dis_thresh).state - 5.0f;
+                    return v < 0.0f ? 0.0f : v;
+              - component.update: tft_display
+
+  # Row 7: DIS THRESH +
+  - platform: touchscreen
+    name: "Touch DisThr Up"
+    touchscreen_id: my_touch
+    x_min: 286
+    x_max: 316
+    y_min: 211
+    y_max: 235
+    on_press:
+      then:
+        - if:
+            condition:
+              lambda: 'return id(screen_state) == 2 && id(fossi_menu);'
+            then:
+              - number.set:
+                  id: num_dis_thresh
+                  value: !lambda |-
+                    float v = id(num_dis_thresh).state + 5.0f;
+                    return v > 50.0f ? 50.0f : v;
+              - component.update: tft_display
+
+# --- NUMBER CONTROLS ---
 number:
   - platform: fbot
     fbot_id: my_fbot
-    threshold_charge:    { name: "Charge Threshold" }
-    threshold_discharge: { name: "Discharge Threshold" }
+    threshold_charge:    { name: "Charge Threshold",    id: num_chg_thresh }
+    threshold_discharge: { name: "Discharge Threshold", id: num_dis_thresh }
+
+# --- SELECT CONTROLS ---
+select:
+  - platform: fbot
+    fbot_id: my_fbot
+    light_mode:      { name: "Light Mode",      id: sel_light_mode }
+    ac_charge_limit: { name: "AC Charge Limit", id: sel_charge_limit }
 
 # --- SWITCHES ---
 switch:
   - platform: fbot
     fbot_id: my_fbot
-    ac:  { name: "AC",  id: sw_ac }
-    usb: { name: "USB", id: sw_usb }
-    dc:  { name: "DC",  id: sw_dc }
+    ac:         { name: "AC",               id: sw_ac }
+    usb:        { name: "USB",              id: sw_usb }
+    dc:         { name: "DC",               id: sw_dc }
+    key_sound:  { name: "Key Sound",        id: sw_key_sound }
+    light:      { name: "Light",            id: sw_light }
+    ac_silent:  { name: "Silent Charging",  id: sw_ac_silent }
