@@ -66,10 +66,13 @@ globals:
     type: uint32_t
     restore_value: no
     initial_value: '0'
+  - id: last_touch_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
 
 # --- SMART ANIMATION REFRESH ---
-# Normal display refresh is 1 s (saves power / SPI bus).
-# This interval forces 10 fps updates ONLY while a pulse animation is active.
+# Normal display refresh is 5 s. Forces 10 fps updates only while pulse active.
 interval:
   - interval: 100ms
     then:
@@ -82,6 +85,40 @@ interval:
                      (now - id(dc_press_time)  < 1500);
           then:
             - component.update: tft_display
+
+  # --- BACKLIGHT TIMEOUT ---
+  # Dims to 20% after 30 s idle, fully off after 60 s idle.
+  - interval: 5s
+    then:
+      - lambda: |-
+          uint32_t idle = millis() - id(last_touch_ms);
+          if (idle > 60000) {
+            auto call = id(backlight).turn_off();
+            call.set_transition_length(1000);
+            call.perform();
+          } else if (idle > 30000) {
+            auto call = id(backlight).turn_on();
+            call.set_brightness(0.15f);
+            call.set_transition_length(2000);
+            call.perform();
+          }
+
+# --- BACKLIGHT PWM OUTPUT ---
+# Wire the display's LED/BL pin to GPIO15 instead of directly to 3.3V.
+output:
+  - platform: ledc
+    pin: GPIO15
+    id: backlight_pwm
+    frequency: 1000Hz
+
+# Exposes backlight as a dimmable light in Home Assistant.
+light:
+  - platform: monochromatic
+    output: backlight_pwm
+    id: backlight
+    name: "Display Backlight"
+    default_transition_length: 500ms
+    restore_mode: ALWAYS_ON
 
 # --- HARDWARE: SHARED SPI BUS ---
 spi:
@@ -258,7 +295,19 @@ touchscreen:
   transform:
     swap_xy: true
     mirror_x: true
-    mirror_y: false
+    mirror_y: true
+  on_touch:
+    - globals.set:
+        id: last_touch_ms
+        value: !lambda 'return millis();'
+    - if:
+        condition:
+          lambda: 'return !id(backlight).current_values.is_on();'
+        then:
+          - light.turn_on:
+              id: backlight
+              brightness: 100%
+              transition_length: 300ms
 
 # --- HARDWARE: BLUETOOTH ---
 esp32_ble_tracker:
