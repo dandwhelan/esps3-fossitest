@@ -140,11 +140,15 @@ display:
   dc_pin: GPIO9
   reset_pin: GPIO14
   rotation: 90
-  data_rate: 20MHz
+  data_rate: 10MHz
   invert_colors: false
   update_interval: 1s
 
   lambda: |-
+    // DIAGNOSTIC: solid red fill — if red appears, SPI + controller OK
+    it.fill(Color(255, 0, 0));
+    return;
+
     // =============================================
     //  CLEAR BACKGROUND
     // =============================================
