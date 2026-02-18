@@ -151,7 +151,6 @@ light:
     id: status_led
     pin: GPIO48
     num_leds: 1
-    rmt_channel: 0
     chipset: WS2812
     rgb_order: GRB
     name: "Battery LED"
@@ -162,6 +161,12 @@ spi:
   clk_pin: GPIO12
   mosi_pin: GPIO11
   miso_pin: GPIO13
+
+# --- HARDWARE: I2C BUS (BME280) ---
+i2c:
+  sda: GPIO17
+  scl: GPIO18
+  scan: true
 
 # --- FONTS ---
 font:
@@ -323,10 +328,15 @@ display:
       it.printf(5, 2, id(font_sm), id(c_white), "Remote: %.1fV", id(dashboard_voltage).state);
     }
 
-    if (id(fbot_connected).state) {
-      it.print(315, 2, id(font_sm), id(c_green), TextAlign::TOP_RIGHT, "BLE: ON");
+    // --- Temp & Humidity (top right) ---
+    if (id(bme_temp).has_state() && id(bme_hum).has_state()) {
+      it.printf(315, 2, id(font_sm), id(c_white), TextAlign::TOP_RIGHT,
+                "%.0f°C  %.0f%%", id(bme_temp).state, id(bme_hum).state);
     } else {
-      it.print(315, 2, id(font_sm), id(c_fossibot_orange), TextAlign::TOP_RIGHT, "SCANNING...");
+      it.print(315, 2, id(font_sm), id(c_grid), TextAlign::TOP_RIGHT, "-- --");
+    }
+
+    if (!id(fbot_connected).state) {
       it.print(160, 120, id(font_md), id(c_white), TextAlign::CENTER, "Waiting for Fossibot...");
       return;
     }
@@ -477,6 +487,21 @@ sensor:
     id: dashboard_voltage
     filters:
       - multiply: 2.0
+
+  - platform: bme280_i2c
+    address: 0x76
+    update_interval: 30s
+    temperature:
+      name: "Temperature"
+      id: bme_temp
+      oversampling: 2x
+    humidity:
+      name: "Humidity"
+      id: bme_hum
+      oversampling: 2x
+    pressure:
+      name: "Pressure"
+      id: bme_pres
 
   - platform: fbot
     fbot_id: my_fbot
