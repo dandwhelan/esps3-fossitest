@@ -85,19 +85,15 @@ globals:
     type: int
     restore_value: no
     initial_value: '0'
-  - id: usb_timer_mins
-    type: int
-    restore_value: no
-    initial_value: '0'
   - id: dc_timer_mins
     type: int
     restore_value: no
     initial_value: '0'
-  - id: ac_timer_start
-    type: uint32_t
+  - id: idle_timeout_secs
+    type: int
     restore_value: no
-    initial_value: '0'
-  - id: usb_timer_start
+    initial_value: '60'
+  - id: ac_timer_start
     type: uint32_t
     restore_value: no
     initial_value: '0'
@@ -121,14 +117,16 @@ interval:
           then:
             - component.update: tft_display
 
-  # Backlight timeout — direct PWM, only fires on state change
+  # Backlight timeout — driven by idle_timeout_secs setting
   - interval: 5s
     then:
       - lambda: |-
+          uint32_t timeout_ms = (uint32_t)id(idle_timeout_secs) * 1000UL;
+          if (timeout_ms == 0) return;
           uint32_t idle = millis() - id(last_touch_ms);
           int target = 2;
-          if (idle > 60000) target = 0;
-          else if (idle > 30000) target = 1;
+          if (idle > timeout_ms) target = 0;
+          else if (idle > timeout_ms / 2) target = 1;
           if (target != id(screen_state)) {
             id(screen_state) = target;
             if (target == 0) {
@@ -154,17 +152,6 @@ interval:
             }
           } else {
             id(ac_timer_start) = 0;
-          }
-          // USB Timer
-          if (id(usb_timer_mins) > 0 && id(sw_usb).state) {
-            if (id(usb_timer_start) == 0) {
-              id(usb_timer_start) = now;
-            } else if ((now - id(usb_timer_start)) > (uint32_t)id(usb_timer_mins) * 60000UL) {
-              id(sw_usb).turn_off();
-              id(usb_timer_start) = 0;
-            }
-          } else {
-            id(usb_timer_start) = 0;
           }
           // DC Timer
           if (id(dc_timer_mins) > 0 && id(sw_dc).state) {
@@ -365,13 +352,19 @@ display:
                TextAlign::TOP_CENTER, tbuf);
       draw_nav(286, by + 3, 30, 24, ">");
 
-      // Row 5: USB TIMER
+      // Row 5: IDLE TIMER (screen timeout)
       by += rh;
-      it.print(5, by + 7, id(font_sm), id(c_white), "USB TIMER");
+      it.print(5, by + 7, id(font_sm), id(c_white), "IDLE TIMER");
       draw_nav(185, by + 3, 30, 24, "<");
-      fmt_timer(id(usb_timer_mins), tbuf, sizeof(tbuf));
-      it.print(250, by + 7, id(font_sm), id(c_fossibot_orange),
-               TextAlign::TOP_CENTER, tbuf);
+      {
+        char ibuf[8];
+        int s = id(idle_timeout_secs);
+        if (s <= 0)      snprintf(ibuf, sizeof(ibuf), "NEVER");
+        else if (s < 60) snprintf(ibuf, sizeof(ibuf), "%ds", s);
+        else             snprintf(ibuf, sizeof(ibuf), "%dm", s / 60);
+        it.print(250, by + 7, id(font_sm), id(c_fossibot_orange),
+                 TextAlign::TOP_CENTER, ibuf);
+      }
       draw_nav(286, by + 3, 30, 24, ">");
 
       // Row 6: DC TIMER
@@ -517,6 +510,7 @@ touchscreen:
     - lambda: |-
         uint32_t now = millis();
         id(last_touch_ms) = now;
+        ESP_LOGD("touch", "on_touch: state=%d menu=%d", id(screen_state), (int)id(fossi_menu));
         if (id(screen_state) == 0) {
           // Screen off: require double-tap to wake
           uint32_t gap = now - id(last_tap_ms);
@@ -675,6 +669,7 @@ binary_sensor:
     y_max: 240
     on_press:
       then:
+        - lambda: 'ESP_LOGD("touch", "SET zone: state=%d menu=%d", id(screen_state), (int)id(fossi_menu));'
         - if:
             condition:
               lambda: 'return id(screen_state) == 2 && !id(fossi_menu);'
@@ -695,6 +690,7 @@ binary_sensor:
     y_max: 24
     on_press:
       then:
+        - lambda: 'ESP_LOGD("touch", "BACK zone: state=%d menu=%d", id(screen_state), (int)id(fossi_menu));'
         - if:
             condition:
               lambda: 'return id(screen_state) == 2 && id(fossi_menu);'
@@ -851,9 +847,9 @@ binary_sensor:
                   id(ac_timer_start) = 0;
               - component.update: tft_display
 
-  # Row 5: USB TIMER < (y = 148+3=151 to 151+24=175)
+  # Row 5: IDLE TIMER < (y = 148+3=151 to 151+24=175)
   - platform: touchscreen
-    name: "Touch UsbTimer Prev"
+    name: "Touch IdleTmr Prev"
     touchscreen_id: my_touch
     x_min: 185
     x_max: 215
@@ -866,17 +862,16 @@ binary_sensor:
               lambda: 'return id(screen_state) == 2 && id(fossi_menu);'
             then:
               - lambda: |-
-                  int c = id(usb_timer_mins);
-                  const int p[] = {0, 30, 60, 120, 240, 480};
-                  int v = 480;
+                  int c = id(idle_timeout_secs);
+                  const int p[] = {0, 30, 60, 120, 300, 600};
+                  int v = 600;
                   for (int i = 1; i < 6; i++) { if (p[i] == c) { v = p[i-1]; break; } }
-                  id(usb_timer_mins) = v;
-                  id(usb_timer_start) = 0;
+                  id(idle_timeout_secs) = v;
               - component.update: tft_display
 
-  # Row 5: USB TIMER >
+  # Row 5: IDLE TIMER >
   - platform: touchscreen
-    name: "Touch UsbTimer Next"
+    name: "Touch IdleTmr Next"
     touchscreen_id: my_touch
     x_min: 286
     x_max: 316
@@ -889,12 +884,11 @@ binary_sensor:
               lambda: 'return id(screen_state) == 2 && id(fossi_menu);'
             then:
               - lambda: |-
-                  int c = id(usb_timer_mins);
-                  const int p[] = {0, 30, 60, 120, 240, 480};
+                  int c = id(idle_timeout_secs);
+                  const int p[] = {0, 30, 60, 120, 300, 600};
                   int v = 0;
                   for (int i = 0; i < 5; i++) { if (p[i] == c) { v = p[i+1]; break; } }
-                  id(usb_timer_mins) = v;
-                  id(usb_timer_start) = 0;
+                  id(idle_timeout_secs) = v;
               - component.update: tft_display
 
   # Row 6: DC TIMER < (y = 178+3=181 to 181+24=205)
