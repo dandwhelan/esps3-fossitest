@@ -148,8 +148,7 @@ interval:
             if (id(ac_timer_start) == 0) {
               id(ac_timer_start) = now;
             } else if ((now - id(ac_timer_start)) > (uint32_t)id(ac_timer_mins) * 60000UL) {
-              auto call = id(sw_ac).turn_off();
-              call.perform();
+              id(sw_ac).turn_off();
               id(ac_timer_start) = 0;
             }
           } else {
@@ -160,8 +159,7 @@ interval:
             if (id(usb_timer_start) == 0) {
               id(usb_timer_start) = now;
             } else if ((now - id(usb_timer_start)) > (uint32_t)id(usb_timer_mins) * 60000UL) {
-              auto call = id(sw_usb).turn_off();
-              call.perform();
+              id(sw_usb).turn_off();
               id(usb_timer_start) = 0;
             }
           } else {
@@ -172,8 +170,7 @@ interval:
             if (id(dc_timer_start) == 0) {
               id(dc_timer_start) = now;
             } else if ((now - id(dc_timer_start)) > (uint32_t)id(dc_timer_mins) * 60000UL) {
-              auto call = id(sw_dc).turn_off();
-              call.perform();
+              id(sw_dc).turn_off();
               id(dc_timer_start) = 0;
             }
           } else {
