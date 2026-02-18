@@ -135,13 +135,18 @@ interval:
           int target = 2;
           if (idle > timeout_ms) target = 0;
           else if (idle > timeout_ms / 2) target = 1;
-          if (target != id(screen_state)) {
-            id(screen_state) = target;
-            if (target == 0) {
-              id(backlight_pwm).set_level(0.0f);
-            } else if (target == 1) {
-              id(backlight_pwm).set_level(0.15f);
+          if (target == id(screen_state)) return;
+          int prev = id(screen_state);
+          id(screen_state) = target;
+          if (target == 0) {
+            id(backlight_pwm).set_level(0.0f);
+            id(tft_display).command(0x10);   // ILI9341 Sleep In
+          } else if (target == 1) {
+            if (prev == 0) {
+              id(tft_display).command(0x11); // ILI9341 Sleep Out
+              delay(120);
             }
+            id(backlight_pwm).set_level(0.15f);
           }
 
   # Timer auto-off check
@@ -405,7 +410,30 @@ display:
     //  TOP STATUS BAR
     // =============================================
     if (id(dashboard_voltage).has_state()) {
-      it.printf(5, 2, id(font_sm), id(c_white), "Remote: %.1fV", id(dashboard_voltage).state);
+      it.printf(5, 2, id(font_sm), id(c_white), "%.1fV", id(dashboard_voltage).state);
+    }
+
+    // --- Time estimate (top centre) ---
+    if (id(fbot_in).has_state() && id(fbot_out).has_state()) {
+      float in_w = id(fbot_in).state;
+      float out_w = id(fbot_out).state;
+      if (in_w > out_w && id(fbot_time_to_full).has_state()) {
+        int mins = (int)id(fbot_time_to_full).state;
+        if (mins > 0) {
+          char tbuf[16];
+          if (mins >= 60) snprintf(tbuf, sizeof(tbuf), "%dh %dm", mins / 60, mins % 60);
+          else snprintf(tbuf, sizeof(tbuf), "%dm", mins);
+          it.print(160, 2, id(font_sm), id(c_green), TextAlign::TOP_CENTER, tbuf);
+        }
+      } else if (id(fbot_remaining).has_state()) {
+        int mins = (int)id(fbot_remaining).state;
+        if (mins > 0) {
+          char tbuf[16];
+          if (mins >= 60) snprintf(tbuf, sizeof(tbuf), "%dh %dm", mins / 60, mins % 60);
+          else snprintf(tbuf, sizeof(tbuf), "%dm", mins);
+          it.print(160, 2, id(font_sm), id(c_fossibot_orange), TextAlign::TOP_CENTER, tbuf);
+        }
+      }
     }
 
     // --- Temp & Humidity (top right) ---
@@ -424,29 +452,6 @@ display:
     // =============================================
     //  MAIN DASHBOARD  (only when BLE is connected)
     // =============================================
-
-    // --- Charge / Discharge time estimate (above battery %) ---
-    if (id(fbot_in).has_state() && id(fbot_out).has_state()) {
-      float in_w = id(fbot_in).state;
-      float out_w = id(fbot_out).state;
-      if (in_w > out_w && id(fbot_time_to_full).has_state()) {
-        int mins = (int)id(fbot_time_to_full).state;
-        if (mins > 0) {
-          char tbuf[16];
-          if (mins >= 60) snprintf(tbuf, sizeof(tbuf), "CHG %dh %dm", mins / 60, mins % 60);
-          else snprintf(tbuf, sizeof(tbuf), "CHG %dm", mins);
-          it.print(160, 72, id(font_sm), id(c_green), TextAlign::CENTER, tbuf);
-        }
-      } else if (id(fbot_remaining).has_state()) {
-        int mins = (int)id(fbot_remaining).state;
-        if (mins > 0) {
-          char tbuf[16];
-          if (mins >= 60) snprintf(tbuf, sizeof(tbuf), "REM %dh %dm", mins / 60, mins % 60);
-          else snprintf(tbuf, sizeof(tbuf), "REM %dm", mins);
-          it.print(160, 72, id(font_sm), id(c_fossibot_orange), TextAlign::CENTER, tbuf);
-        }
-      }
-    }
 
     // --- Battery % (shifted down to make room for time estimate) ---
     if (id(fbot_bat).has_state()) {
@@ -543,6 +548,8 @@ touchscreen:
           // Screen off: require double-tap to wake
           uint32_t gap = now - id(last_tap_ms);
           if (gap > 100 && gap < 500) {
+            id(tft_display).command(0x11); // ILI9341 Sleep Out
+            delay(120);
             id(screen_state) = 2;
             id(backlight_pwm).set_level(1.0f);
             id(last_tap_ms) = 0;
@@ -602,7 +609,7 @@ sensor:
     fbot_id: my_fbot
     battery_level:   { name: "Battery",        id: fbot_bat }
     input_power:     { name: "Input",          id: fbot_in }
-    output_power:    { name: "Output",         id: fbot_out }
+    total_power:     { name: "Total Output",   id: fbot_out }
     time_to_full:    { name: "Time to Full",   id: fbot_time_to_full }
     remaining_time:  { name: "Remaining Time", id: fbot_remaining }
 
