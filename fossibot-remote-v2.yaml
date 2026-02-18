@@ -422,6 +422,14 @@ display:
     it.print(fx + btn_w / 2, btn_y + btn_h / 2, id(font_md),
              id(c_fossibot_orange), TextAlign::CENTER, "SET");
 
+# --- HARDWARE: DEEP SLEEP (power button) ---
+deep_sleep:
+  id: deep_sleep_ctrl
+  wakeup_pin:
+    number: GPIO4
+    inverted: true
+    allow_other_uses: true
+
 # --- HARDWARE: TOUCHSCREEN ---
 touchscreen:
   platform: xpt2046
@@ -514,6 +522,25 @@ binary_sensor:
   - platform: fbot
     fbot_id: my_fbot
     connected: { name: "Connected", id: fbot_connected }
+
+  # ===== POWER BUTTON (hold 3s to enter deep sleep) =====
+  - platform: gpio
+    pin:
+      number: GPIO4
+      mode: INPUT_PULLUP
+      inverted: true
+      allow_other_uses: true
+    name: "Power Button"
+    id: power_button
+    filters:
+      - delayed_on: 50ms
+    on_click:
+      min_length: 3s
+      max_length: 10s
+      then:
+        - lambda: 'id(backlight_pwm).set_level(0.0f);'
+        - delay: 100ms
+        - deep_sleep.enter: deep_sleep_ctrl
 
   # ===== MAIN DASHBOARD BUTTONS (gated: screen on + menu closed) =====
 
