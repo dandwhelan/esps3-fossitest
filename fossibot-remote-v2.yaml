@@ -83,15 +83,15 @@ globals:
     initial_value: '0'
   - id: ac_timer_mins
     type: int
-    restore_value: yes
+    restore_value: no
     initial_value: '0'
   - id: usb_timer_mins
     type: int
-    restore_value: yes
+    restore_value: no
     initial_value: '0'
   - id: dc_timer_mins
     type: int
-    restore_value: yes
+    restore_value: no
     initial_value: '0'
   - id: ac_timer_start
     type: uint32_t
@@ -142,6 +142,7 @@ interval:
   - interval: 5s
     then:
       - lambda: |-
+          if (!id(fbot_connected).state) return;
           uint32_t now = millis();
           // AC Timer
           if (id(ac_timer_mins) > 0 && id(sw_ac).state) {
@@ -348,10 +349,10 @@ display:
       draw_nav(286, by + 3, 30, 24, "+");
 
       // --- Timer formatting helper ---
-      auto fmt_timer = [](int mins, char* buf) {
-        if (mins == 0) { strcpy(buf, "OFF"); return; }
-        if (mins < 60) { sprintf(buf, "%dm", mins); return; }
-        sprintf(buf, "%dh", mins / 60);
+      auto fmt_timer = [](int mins, char* buf, size_t sz) {
+        if (mins <= 0) { snprintf(buf, sz, "OFF"); return; }
+        if (mins < 60) { snprintf(buf, sz, "%dm", mins); return; }
+        snprintf(buf, sz, "%dh", mins / 60);
       };
       char tbuf[8];
 
@@ -359,7 +360,7 @@ display:
       by += rh;
       it.print(5, by + 7, id(font_sm), id(c_white), "AC TIMER");
       draw_nav(185, by + 3, 30, 24, "<");
-      fmt_timer(id(ac_timer_mins), tbuf);
+      fmt_timer(id(ac_timer_mins), tbuf, sizeof(tbuf));
       it.print(250, by + 7, id(font_sm), id(c_fossibot_orange),
                TextAlign::TOP_CENTER, tbuf);
       draw_nav(286, by + 3, 30, 24, ">");
@@ -368,7 +369,7 @@ display:
       by += rh;
       it.print(5, by + 7, id(font_sm), id(c_white), "USB TIMER");
       draw_nav(185, by + 3, 30, 24, "<");
-      fmt_timer(id(usb_timer_mins), tbuf);
+      fmt_timer(id(usb_timer_mins), tbuf, sizeof(tbuf));
       it.print(250, by + 7, id(font_sm), id(c_fossibot_orange),
                TextAlign::TOP_CENTER, tbuf);
       draw_nav(286, by + 3, 30, 24, ">");
@@ -377,7 +378,7 @@ display:
       by += rh;
       it.print(5, by + 7, id(font_sm), id(c_white), "DC TIMER");
       draw_nav(185, by + 3, 30, 24, "<");
-      fmt_timer(id(dc_timer_mins), tbuf);
+      fmt_timer(id(dc_timer_mins), tbuf, sizeof(tbuf));
       it.print(250, by + 7, id(font_sm), id(c_fossibot_orange),
                TextAlign::TOP_CENTER, tbuf);
       draw_nav(286, by + 3, 30, 24, ">");
