@@ -47,8 +47,7 @@ wifi:
 captive_portal:
 
 external_components:
-  - source: github://dandwhelan/esp-fbot
-    refresh: 0s
+  - source: components
     components: [ fbot ]
 
 # --- GLOBALS ---
@@ -81,6 +80,34 @@ globals:
     type: uint32_t
     restore_value: no
     initial_value: '0'
+  - id: ac_timer_mins
+    type: int
+    restore_value: no
+    initial_value: '0'
+  - id: dc_timer_mins
+    type: int
+    restore_value: no
+    initial_value: '0'
+  - id: idle_timeout_secs
+    type: int
+    restore_value: no
+    initial_value: '60'
+  - id: ac_timer_start
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+  - id: dc_timer_start
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+  - id: settings_tap_count
+    type: int
+    restore_value: no
+    initial_value: '0'
+  - id: settings_first_tap_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
 
 # --- INTERVALS ---
 interval:
@@ -97,14 +124,16 @@ interval:
           then:
             - component.update: tft_display
 
-  # Backlight timeout — direct PWM, only fires on state change
+  # Backlight timeout — driven by idle_timeout_secs setting
   - interval: 5s
     then:
       - lambda: |-
+          uint32_t timeout_ms = (uint32_t)id(idle_timeout_secs) * 1000UL;
+          if (timeout_ms == 0) return;
           uint32_t idle = millis() - id(last_touch_ms);
           int target = 2;
-          if (idle > 60000) target = 0;
-          else if (idle > 30000) target = 1;
+          if (idle > timeout_ms) target = 0;
+          else if (idle > timeout_ms / 2) target = 1;
           if (target != id(screen_state)) {
             id(screen_state) = target;
             if (target == 0) {
@@ -112,6 +141,35 @@ interval:
             } else if (target == 1) {
               id(backlight_pwm).set_level(0.15f);
             }
+          }
+
+  # Timer auto-off check
+  - interval: 5s
+    then:
+      - lambda: |-
+          if (!id(fbot_connected).state) return;
+          uint32_t now = millis();
+          // AC Timer
+          if (id(ac_timer_mins) > 0 && id(sw_ac).state) {
+            if (id(ac_timer_start) == 0) {
+              id(ac_timer_start) = now;
+            } else if ((now - id(ac_timer_start)) > (uint32_t)id(ac_timer_mins) * 60000UL) {
+              id(sw_ac).turn_off();
+              id(ac_timer_start) = 0;
+            }
+          } else {
+            id(ac_timer_start) = 0;
+          }
+          // DC Timer
+          if (id(dc_timer_mins) > 0 && id(sw_dc).state) {
+            if (id(dc_timer_start) == 0) {
+              id(dc_timer_start) = now;
+            } else if ((now - id(dc_timer_start)) > (uint32_t)id(dc_timer_mins) * 60000UL) {
+              id(sw_dc).turn_off();
+              id(dc_timer_start) = 0;
+            }
+          } else {
+            id(dc_timer_start) = 0;
           }
 
   # Battery LED — smooth red→orange→yellow→green gradient
@@ -260,41 +318,7 @@ display:
       it.print(5, by + 7, id(font_sm), id(c_white), "KEY SOUND");
       draw_toggle(220, by + 3, 96, 24, id(sw_key_sound).state);
 
-      // Row 2: SILENT CHG
-      by += rh;
-      it.print(5, by + 7, id(font_sm), id(c_white), "SILENT CHG");
-      draw_toggle(220, by + 3, 96, 24, id(sw_ac_silent).state);
-
-      // Row 3: LIGHT
-      by += rh;
-      it.print(5, by + 7, id(font_sm), id(c_white), "LIGHT");
-      draw_toggle(220, by + 3, 96, 24, id(sw_light).state);
-
-      // Row 4: LIGHT MODE
-      by += rh;
-      it.print(5, by + 7, id(font_sm), id(c_white), "LIGHT MODE");
-      draw_nav(185, by + 3, 30, 24, "<");
-      if (id(sel_light_mode).has_state())
-        it.print(250, by + 7, id(font_sm), id(c_fossibot_orange),
-                 TextAlign::TOP_CENTER, id(sel_light_mode).state.c_str());
-      else
-        it.print(250, by + 7, id(font_sm), id(c_grid),
-                 TextAlign::TOP_CENTER, "---");
-      draw_nav(286, by + 3, 30, 24, ">");
-
-      // Row 5: CHG LIMIT
-      by += rh;
-      it.print(5, by + 7, id(font_sm), id(c_white), "CHG LIMIT");
-      draw_nav(185, by + 3, 30, 24, "<");
-      if (id(sel_charge_limit).has_state())
-        it.print(250, by + 7, id(font_sm), id(c_fossibot_orange),
-                 TextAlign::TOP_CENTER, id(sel_charge_limit).state.c_str());
-      else
-        it.print(250, by + 7, id(font_sm), id(c_grid),
-                 TextAlign::TOP_CENTER, "---");
-      draw_nav(286, by + 3, 30, 24, ">");
-
-      // Row 6: CHG THRESH
+      // Row 2: CHG THRESH
       by += rh;
       it.print(5, by + 7, id(font_sm), id(c_white), "CHG THRESH");
       draw_nav(185, by + 3, 30, 24, "-");
@@ -306,7 +330,7 @@ display:
                  TextAlign::TOP_CENTER, "---");
       draw_nav(286, by + 3, 30, 24, "+");
 
-      // Row 7: DIS THRESH
+      // Row 3: DIS THRESH
       by += rh;
       it.print(5, by + 7, id(font_sm), id(c_white), "DIS THRESH");
       draw_nav(185, by + 3, 30, 24, "-");
@@ -317,6 +341,61 @@ display:
         it.print(250, by + 7, id(font_sm), id(c_grid),
                  TextAlign::TOP_CENTER, "---");
       draw_nav(286, by + 3, 30, 24, "+");
+
+      // --- Timer formatting helper ---
+      auto fmt_timer = [](int mins, char* buf, size_t sz) {
+        if (mins <= 0) { snprintf(buf, sz, "OFF"); return; }
+        if (mins < 60) { snprintf(buf, sz, "%dm", mins); return; }
+        snprintf(buf, sz, "%dh", mins / 60);
+      };
+      char tbuf[8];
+
+      // Row 4: AC TIMER
+      by += rh;
+      it.print(5, by + 7, id(font_sm), id(c_white), "AC TIMER");
+      draw_nav(185, by + 3, 30, 24, "<");
+      fmt_timer(id(ac_timer_mins), tbuf, sizeof(tbuf));
+      it.print(250, by + 7, id(font_sm), id(c_fossibot_orange),
+               TextAlign::TOP_CENTER, tbuf);
+      draw_nav(286, by + 3, 30, 24, ">");
+
+      // Row 5: IDLE TIMER (screen timeout)
+      by += rh;
+      it.print(5, by + 7, id(font_sm), id(c_white), "IDLE TIMER");
+      draw_nav(185, by + 3, 30, 24, "<");
+      {
+        char ibuf[8];
+        int s = id(idle_timeout_secs);
+        if (s <= 0)      snprintf(ibuf, sizeof(ibuf), "NEVER");
+        else if (s < 60) snprintf(ibuf, sizeof(ibuf), "%ds", s);
+        else             snprintf(ibuf, sizeof(ibuf), "%dm", s / 60);
+        it.print(250, by + 7, id(font_sm), id(c_fossibot_orange),
+                 TextAlign::TOP_CENTER, ibuf);
+      }
+      draw_nav(286, by + 3, 30, 24, ">");
+
+      // Row 6: DC TIMER
+      by += rh;
+      it.print(5, by + 7, id(font_sm), id(c_white), "DC TIMER");
+      draw_nav(185, by + 3, 30, 24, "<");
+      fmt_timer(id(dc_timer_mins), tbuf, sizeof(tbuf));
+      it.print(250, by + 7, id(font_sm), id(c_fossibot_orange),
+               TextAlign::TOP_CENTER, tbuf);
+      draw_nav(286, by + 3, 30, 24, ">");
+
+      // Row 7: SYS SLEEP (Reg 68 — machine shutdown timer)
+      by += rh;
+      it.print(5, by + 7, id(font_sm), id(c_white), "SYS SLEEP");
+      draw_nav(185, by + 3, 30, 24, "<");
+      if (id(num_sleep_timer).has_state()) {
+        fmt_timer((int)id(num_sleep_timer).state, tbuf, sizeof(tbuf));
+        it.print(250, by + 7, id(font_sm), id(c_fossibot_orange),
+                 TextAlign::TOP_CENTER, tbuf);
+      } else {
+        it.print(250, by + 7, id(font_sm), id(c_grid),
+                 TextAlign::TOP_CENTER, "---");
+      }
+      draw_nav(286, by + 3, 30, 24, ">");
 
       return;
     }
@@ -348,11 +427,35 @@ display:
     // --- Battery Percentage (centre circle) ---
     it.circle(160, 105, 55, id(c_grid));
 
+    // --- Charge / Discharge time estimate (above battery %) ---
+    if (id(fbot_in).has_state() && id(fbot_out).has_state()) {
+      float in_w = id(fbot_in).state;
+      float out_w = id(fbot_out).state;
+      if (in_w > out_w && id(fbot_time_to_full).has_state()) {
+        int mins = (int)id(fbot_time_to_full).state;
+        if (mins > 0) {
+          char tbuf[16];
+          if (mins >= 60) snprintf(tbuf, sizeof(tbuf), "CHG %dh %dm", mins / 60, mins % 60);
+          else snprintf(tbuf, sizeof(tbuf), "CHG %dm", mins);
+          it.print(160, 72, id(font_sm), id(c_green), TextAlign::CENTER, tbuf);
+        }
+      } else if (out_w > in_w && id(fbot_remaining).has_state()) {
+        int mins = (int)id(fbot_remaining).state;
+        if (mins > 0) {
+          char tbuf[16];
+          if (mins >= 60) snprintf(tbuf, sizeof(tbuf), "REM %dh %dm", mins / 60, mins % 60);
+          else snprintf(tbuf, sizeof(tbuf), "REM %dm", mins);
+          it.print(160, 72, id(font_sm), id(c_fossibot_orange), TextAlign::CENTER, tbuf);
+        }
+      }
+    }
+
+    // --- Battery % (shifted down to make room for time estimate) ---
     if (id(fbot_bat).has_state()) {
       int bat = (int)id(fbot_bat).state;
       Color bat_color = id(c_white);
       if (bat < 20) bat_color = Color(255, 0, 0);
-      it.printf(160, 105, id(font_lg), bat_color, TextAlign::CENTER, "%d%%", bat);
+      it.printf(160, 115, id(font_lg), bat_color, TextAlign::CENTER, "%d%%", bat);
     }
 
     // --- Power flow (left / right) ---
@@ -367,12 +470,12 @@ display:
     }
 
     // =============================================
-    //  4-BUTTON BAR  (bottom 60 px)
+    //  3-BUTTON BAR  (bottom 60 px — AC / USB / DC)
     // =============================================
     uint32_t now = millis();
     int btn_y = 180;
     int btn_h = 60;
-    int btn_w = 77;
+    int btn_w = 104;
     int gap   = 4;
 
     auto calc_pulse = [](uint32_t press_time, uint32_t now_ms) -> float {
@@ -415,13 +518,6 @@ display:
     draw_button(btn_w + gap,       btn_y, btn_w, btn_h, "USB", id(sw_usb).state, p_usb);
     draw_button(2 * (btn_w + gap), btn_y, btn_w, btn_h, "DC",  id(sw_dc).state,  p_dc);
 
-    // --- FOSSI settings button (orange theme) ---
-    int fx = 3 * (btn_w + gap);
-    it.filled_rectangle(fx, btn_y, btn_w, btn_h, Color(40, 24, 0));
-    it.rectangle(fx, btn_y, btn_w, btn_h, id(c_fossibot_orange));
-    it.print(fx + btn_w / 2, btn_y + btn_h / 2, id(font_md),
-             id(c_fossibot_orange), TextAlign::CENTER, "SET");
-
 # --- HARDWARE: TOUCHSCREEN ---
 touchscreen:
   platform: xpt2046
@@ -444,6 +540,7 @@ touchscreen:
     - lambda: |-
         uint32_t now = millis();
         id(last_touch_ms) = now;
+        ESP_LOGD("touch", "on_touch: state=%d menu=%d", id(screen_state), (int)id(fossi_menu));
         if (id(screen_state) == 0) {
           // Screen off: require double-tap to wake
           uint32_t gap = now - id(last_tap_ms);
@@ -505,9 +602,11 @@ sensor:
 
   - platform: fbot
     fbot_id: my_fbot
-    battery_level: { name: "Battery", id: fbot_bat }
-    input_power:   { name: "Input",   id: fbot_in }
-    output_power:  { name: "Output",  id: fbot_out }
+    battery_level:   { name: "Battery",        id: fbot_bat }
+    input_power:     { name: "Input",          id: fbot_in }
+    output_power:    { name: "Output",         id: fbot_out }
+    time_to_full:    { name: "Time to Full",   id: fbot_time_to_full }
+    remaining_time:  { name: "Remaining Time", id: fbot_remaining }
 
 # --- BINARY SENSORS ---
 binary_sensor:
@@ -515,13 +614,42 @@ binary_sensor:
     fbot_id: my_fbot
     connected: { name: "Connected", id: fbot_connected }
 
+  # ===== 4-TAP SETTINGS GESTURE (top-left corner, hidden) =====
+  - platform: touchscreen
+    name: "Touch Settings Gesture"
+    internal: true
+    touchscreen_id: my_touch
+    x_min: 0
+    x_max: 90
+    y_min: 0
+    y_max: 30
+    on_press:
+      then:
+        - lambda: |-
+            if (id(screen_state) != 2 || id(fossi_menu)) return;
+            uint32_t now = millis();
+            if (now - id(settings_first_tap_ms) > 2000) {
+              id(settings_tap_count) = 1;
+              id(settings_first_tap_ms) = now;
+            } else {
+              id(settings_tap_count) = id(settings_tap_count) + 1;
+            }
+            ESP_LOGD("touch", "Settings gesture: tap %d", id(settings_tap_count));
+            if (id(settings_tap_count) >= 4) {
+              id(fossi_menu) = true;
+              id(settings_tap_count) = 0;
+              id(settings_first_tap_ms) = 0;
+              id(tft_display).update();
+            }
+
   # ===== MAIN DASHBOARD BUTTONS (gated: screen on + menu closed) =====
 
   - platform: touchscreen
     name: "Touch AC"
+    internal: true
     touchscreen_id: my_touch
     x_min: 0
-    x_max: 77
+    x_max: 104
     y_min: 180
     y_max: 240
     on_press:
@@ -538,9 +666,10 @@ binary_sensor:
 
   - platform: touchscreen
     name: "Touch USB"
+    internal: true
     touchscreen_id: my_touch
-    x_min: 81
-    x_max: 158
+    x_min: 108
+    x_max: 212
     y_min: 180
     y_max: 240
     on_press:
@@ -557,9 +686,10 @@ binary_sensor:
 
   - platform: touchscreen
     name: "Touch DC"
+    internal: true
     touchscreen_id: my_touch
-    x_min: 162
-    x_max: 239
+    x_min: 216
+    x_max: 320
     y_min: 180
     y_max: 240
     on_press:
@@ -574,28 +704,11 @@ binary_sensor:
                   value: !lambda 'return millis();'
               - component.update: tft_display
 
-  - platform: touchscreen
-    name: "Touch FOSSI"
-    touchscreen_id: my_touch
-    x_min: 243
-    x_max: 320
-    y_min: 180
-    y_max: 240
-    on_press:
-      then:
-        - if:
-            condition:
-              lambda: 'return id(screen_state) == 2 && !id(fossi_menu);'
-            then:
-              - globals.set:
-                  id: fossi_menu
-                  value: 'true'
-              - component.update: tft_display
-
   # ===== SETTINGS MENU BUTTONS (gated: screen on + menu open) =====
 
   - platform: touchscreen
     name: "Touch Back"
+    internal: true
     touchscreen_id: my_touch
     x_min: 220
     x_max: 320
@@ -615,6 +728,7 @@ binary_sensor:
   # Row 1: KEY SOUND toggle (y = 28+3=31 to 31+24=55)
   - platform: touchscreen
     name: "Touch Key Sound"
+    internal: true
     touchscreen_id: my_touch
     x_min: 220
     x_max: 316
@@ -629,124 +743,15 @@ binary_sensor:
               - switch.toggle: sw_key_sound
               - component.update: tft_display
 
-  # Row 2: SILENT CHG toggle (y = 58+3=61 to 61+24=85)
-  - platform: touchscreen
-    name: "Touch Silent Chg"
-    touchscreen_id: my_touch
-    x_min: 220
-    x_max: 316
-    y_min: 61
-    y_max: 85
-    on_press:
-      then:
-        - if:
-            condition:
-              lambda: 'return id(screen_state) == 2 && id(fossi_menu);'
-            then:
-              - switch.toggle: sw_ac_silent
-              - component.update: tft_display
-
-  # Row 3: LIGHT toggle (y = 88+3=91 to 91+24=115)
-  - platform: touchscreen
-    name: "Touch Light"
-    touchscreen_id: my_touch
-    x_min: 220
-    x_max: 316
-    y_min: 91
-    y_max: 115
-    on_press:
-      then:
-        - if:
-            condition:
-              lambda: 'return id(screen_state) == 2 && id(fossi_menu);'
-            then:
-              - switch.toggle: sw_light
-              - component.update: tft_display
-
-  # Row 4: LIGHT MODE < (y = 118+3=121 to 121+24=145)
-  - platform: touchscreen
-    name: "Touch LtMode Prev"
-    touchscreen_id: my_touch
-    x_min: 185
-    x_max: 215
-    y_min: 121
-    y_max: 145
-    on_press:
-      then:
-        - if:
-            condition:
-              lambda: 'return id(screen_state) == 2 && id(fossi_menu);'
-            then:
-              - select.previous:
-                  id: sel_light_mode
-                  cycle: true
-              - component.update: tft_display
-
-  # Row 4: LIGHT MODE >
-  - platform: touchscreen
-    name: "Touch LtMode Next"
-    touchscreen_id: my_touch
-    x_min: 286
-    x_max: 316
-    y_min: 121
-    y_max: 145
-    on_press:
-      then:
-        - if:
-            condition:
-              lambda: 'return id(screen_state) == 2 && id(fossi_menu);'
-            then:
-              - select.next:
-                  id: sel_light_mode
-                  cycle: true
-              - component.update: tft_display
-
-  # Row 5: CHG LIMIT < (y = 148+3=151 to 151+24=175)
-  - platform: touchscreen
-    name: "Touch ChgLim Prev"
-    touchscreen_id: my_touch
-    x_min: 185
-    x_max: 215
-    y_min: 151
-    y_max: 175
-    on_press:
-      then:
-        - if:
-            condition:
-              lambda: 'return id(screen_state) == 2 && id(fossi_menu);'
-            then:
-              - select.previous:
-                  id: sel_charge_limit
-                  cycle: true
-              - component.update: tft_display
-
-  # Row 5: CHG LIMIT >
-  - platform: touchscreen
-    name: "Touch ChgLim Next"
-    touchscreen_id: my_touch
-    x_min: 286
-    x_max: 316
-    y_min: 151
-    y_max: 175
-    on_press:
-      then:
-        - if:
-            condition:
-              lambda: 'return id(screen_state) == 2 && id(fossi_menu);'
-            then:
-              - select.next:
-                  id: sel_charge_limit
-                  cycle: true
-              - component.update: tft_display
-
-  # Row 6: CHG THRESH - (y = 178+3=181 to 181+24=205)
+  # Row 2: CHG THRESH - (y = 58+3=61 to 61+24=85)
   - platform: touchscreen
     name: "Touch ChgThr Down"
+    internal: true
     touchscreen_id: my_touch
     x_min: 185
     x_max: 215
-    y_min: 181
-    y_max: 205
+    y_min: 61
+    y_max: 85
     on_press:
       then:
         - if:
@@ -760,14 +765,15 @@ binary_sensor:
                     return v < 10.0f ? 10.0f : v;
               - component.update: tft_display
 
-  # Row 6: CHG THRESH +
+  # Row 2: CHG THRESH +
   - platform: touchscreen
     name: "Touch ChgThr Up"
+    internal: true
     touchscreen_id: my_touch
     x_min: 286
     x_max: 316
-    y_min: 181
-    y_max: 205
+    y_min: 61
+    y_max: 85
     on_press:
       then:
         - if:
@@ -781,14 +787,15 @@ binary_sensor:
                     return v > 100.0f ? 100.0f : v;
               - component.update: tft_display
 
-  # Row 7: DIS THRESH - (y = 208+3=211 to 211+24=235)
+  # Row 3: DIS THRESH - (y = 88+3=91 to 91+24=115)
   - platform: touchscreen
     name: "Touch DisThr Down"
+    internal: true
     touchscreen_id: my_touch
     x_min: 185
     x_max: 215
-    y_min: 211
-    y_max: 235
+    y_min: 91
+    y_max: 115
     on_press:
       then:
         - if:
@@ -802,14 +809,15 @@ binary_sensor:
                     return v < 0.0f ? 0.0f : v;
               - component.update: tft_display
 
-  # Row 7: DIS THRESH +
+  # Row 3: DIS THRESH +
   - platform: touchscreen
     name: "Touch DisThr Up"
+    internal: true
     touchscreen_id: my_touch
     x_min: 286
     x_max: 316
-    y_min: 211
-    y_max: 235
+    y_min: 91
+    y_max: 115
     on_press:
       then:
         - if:
@@ -823,12 +831,205 @@ binary_sensor:
                     return v > 50.0f ? 50.0f : v;
               - component.update: tft_display
 
+  # Row 4: AC TIMER < (y = 118+3=121 to 121+24=145)
+  - platform: touchscreen
+    name: "Touch AcTimer Prev"
+    internal: true
+    touchscreen_id: my_touch
+    x_min: 185
+    x_max: 215
+    y_min: 121
+    y_max: 145
+    on_press:
+      then:
+        - if:
+            condition:
+              lambda: 'return id(screen_state) == 2 && id(fossi_menu);'
+            then:
+              - lambda: |-
+                  int c = id(ac_timer_mins);
+                  const int p[] = {0, 30, 60, 120, 240, 480};
+                  int v = 480;
+                  for (int i = 1; i < 6; i++) { if (p[i] == c) { v = p[i-1]; break; } }
+                  id(ac_timer_mins) = v;
+                  id(ac_timer_start) = 0;
+              - component.update: tft_display
+
+  # Row 4: AC TIMER >
+  - platform: touchscreen
+    name: "Touch AcTimer Next"
+    internal: true
+    touchscreen_id: my_touch
+    x_min: 286
+    x_max: 316
+    y_min: 121
+    y_max: 145
+    on_press:
+      then:
+        - if:
+            condition:
+              lambda: 'return id(screen_state) == 2 && id(fossi_menu);'
+            then:
+              - lambda: |-
+                  int c = id(ac_timer_mins);
+                  const int p[] = {0, 30, 60, 120, 240, 480};
+                  int v = 0;
+                  for (int i = 0; i < 5; i++) { if (p[i] == c) { v = p[i+1]; break; } }
+                  id(ac_timer_mins) = v;
+                  id(ac_timer_start) = 0;
+              - component.update: tft_display
+
+  # Row 5: IDLE TIMER < (y = 148+3=151 to 151+24=175)
+  - platform: touchscreen
+    name: "Touch IdleTmr Prev"
+    internal: true
+    touchscreen_id: my_touch
+    x_min: 185
+    x_max: 215
+    y_min: 151
+    y_max: 175
+    on_press:
+      then:
+        - if:
+            condition:
+              lambda: 'return id(screen_state) == 2 && id(fossi_menu);'
+            then:
+              - lambda: |-
+                  int c = id(idle_timeout_secs);
+                  const int p[] = {0, 30, 60, 120, 300, 600};
+                  int v = 600;
+                  for (int i = 1; i < 6; i++) { if (p[i] == c) { v = p[i-1]; break; } }
+                  id(idle_timeout_secs) = v;
+              - component.update: tft_display
+
+  # Row 5: IDLE TIMER >
+  - platform: touchscreen
+    name: "Touch IdleTmr Next"
+    internal: true
+    touchscreen_id: my_touch
+    x_min: 286
+    x_max: 316
+    y_min: 151
+    y_max: 175
+    on_press:
+      then:
+        - if:
+            condition:
+              lambda: 'return id(screen_state) == 2 && id(fossi_menu);'
+            then:
+              - lambda: |-
+                  int c = id(idle_timeout_secs);
+                  const int p[] = {0, 30, 60, 120, 300, 600};
+                  int v = 0;
+                  for (int i = 0; i < 5; i++) { if (p[i] == c) { v = p[i+1]; break; } }
+                  id(idle_timeout_secs) = v;
+              - component.update: tft_display
+
+  # Row 6: DC TIMER < (y = 178+3=181 to 181+24=205)
+  - platform: touchscreen
+    name: "Touch DcTimer Prev"
+    internal: true
+    touchscreen_id: my_touch
+    x_min: 185
+    x_max: 215
+    y_min: 181
+    y_max: 205
+    on_press:
+      then:
+        - if:
+            condition:
+              lambda: 'return id(screen_state) == 2 && id(fossi_menu);'
+            then:
+              - lambda: |-
+                  int c = id(dc_timer_mins);
+                  const int p[] = {0, 30, 60, 120, 240, 480};
+                  int v = 480;
+                  for (int i = 1; i < 6; i++) { if (p[i] == c) { v = p[i-1]; break; } }
+                  id(dc_timer_mins) = v;
+                  id(dc_timer_start) = 0;
+              - component.update: tft_display
+
+  # Row 6: DC TIMER >
+  - platform: touchscreen
+    name: "Touch DcTimer Next"
+    internal: true
+    touchscreen_id: my_touch
+    x_min: 286
+    x_max: 316
+    y_min: 181
+    y_max: 205
+    on_press:
+      then:
+        - if:
+            condition:
+              lambda: 'return id(screen_state) == 2 && id(fossi_menu);'
+            then:
+              - lambda: |-
+                  int c = id(dc_timer_mins);
+                  const int p[] = {0, 30, 60, 120, 240, 480};
+                  int v = 0;
+                  for (int i = 0; i < 5; i++) { if (p[i] == c) { v = p[i+1]; break; } }
+                  id(dc_timer_mins) = v;
+                  id(dc_timer_start) = 0;
+              - component.update: tft_display
+
+  # Row 7: SYS SLEEP < (y = 208+3=211 to 211+24=235)
+  - platform: touchscreen
+    name: "Touch SysSleep Prev"
+    internal: true
+    touchscreen_id: my_touch
+    x_min: 185
+    x_max: 215
+    y_min: 211
+    y_max: 235
+    on_press:
+      then:
+        - if:
+            condition:
+              lambda: 'return id(screen_state) == 2 && id(fossi_menu) && id(num_sleep_timer).has_state();'
+            then:
+              - lambda: |-
+                  int c = (int)id(num_sleep_timer).state;
+                  const int p[] = {5, 10, 30, 480};
+                  int v = 480;
+                  for (int i = 1; i < 4; i++) { if (p[i] == c) { v = p[i-1]; break; } }
+                  auto call = id(num_sleep_timer).make_call();
+                  call.set_value((float)v);
+                  call.perform();
+              - component.update: tft_display
+
+  # Row 7: SYS SLEEP >
+  - platform: touchscreen
+    name: "Touch SysSleep Next"
+    internal: true
+    touchscreen_id: my_touch
+    x_min: 286
+    x_max: 316
+    y_min: 211
+    y_max: 235
+    on_press:
+      then:
+        - if:
+            condition:
+              lambda: 'return id(screen_state) == 2 && id(fossi_menu) && id(num_sleep_timer).has_state();'
+            then:
+              - lambda: |-
+                  int c = (int)id(num_sleep_timer).state;
+                  const int p[] = {5, 10, 30, 480};
+                  int v = 5;
+                  for (int i = 0; i < 3; i++) { if (p[i] == c) { v = p[i+1]; break; } }
+                  auto call = id(num_sleep_timer).make_call();
+                  call.set_value((float)v);
+                  call.perform();
+              - component.update: tft_display
+
 # --- NUMBER CONTROLS ---
 number:
   - platform: fbot
     fbot_id: my_fbot
     threshold_charge:    { name: "Charge Threshold",    id: num_chg_thresh }
     threshold_discharge: { name: "Discharge Threshold", id: num_dis_thresh }
+    sleep_timer:         { name: "Sleep Timer",         id: num_sleep_timer }
 
 # --- SELECT CONTROLS ---
 select:
