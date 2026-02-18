@@ -136,16 +136,10 @@ interval:
           if (idle > timeout_ms) target = 0;
           else if (idle > timeout_ms / 2) target = 1;
           if (target == id(screen_state)) return;
-          int prev = id(screen_state);
           id(screen_state) = target;
           if (target == 0) {
             id(backlight_pwm).set_level(0.0f);
-            id(tft_display).command(0x10);   // ILI9341 Sleep In
           } else if (target == 1) {
-            if (prev == 0) {
-              id(tft_display).command(0x11); // ILI9341 Sleep Out
-              delay(120);
-            }
             id(backlight_pwm).set_level(0.15f);
           }
 
@@ -548,8 +542,6 @@ touchscreen:
           // Screen off: require double-tap to wake
           uint32_t gap = now - id(last_tap_ms);
           if (gap > 100 && gap < 500) {
-            id(tft_display).command(0x11); // ILI9341 Sleep Out
-            delay(120);
             id(screen_state) = 2;
             id(backlight_pwm).set_level(1.0f);
             id(last_tap_ms) = 0;
