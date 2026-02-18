@@ -276,7 +276,7 @@ display:
       draw_nav(185, by + 3, 30, 24, "<");
       if (id(sel_light_mode).has_state())
         it.print(250, by + 7, id(font_sm), id(c_fossibot_orange),
-                 TextAlign::TOP_CENTER, id(sel_light_mode).state.c_str());
+                 TextAlign::TOP_CENTER, id(sel_light_mode).current_option().c_str());
       else
         it.print(250, by + 7, id(font_sm), id(c_grid),
                  TextAlign::TOP_CENTER, "---");
@@ -288,7 +288,7 @@ display:
       draw_nav(185, by + 3, 30, 24, "<");
       if (id(sel_charge_limit).has_state())
         it.print(250, by + 7, id(font_sm), id(c_fossibot_orange),
-                 TextAlign::TOP_CENTER, id(sel_charge_limit).state.c_str());
+                 TextAlign::TOP_CENTER, id(sel_charge_limit).current_option().c_str());
       else
         it.print(250, by + 7, id(font_sm), id(c_grid),
                  TextAlign::TOP_CENTER, "---");
