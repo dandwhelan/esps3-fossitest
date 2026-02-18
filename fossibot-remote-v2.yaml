@@ -47,8 +47,9 @@ wifi:
 captive_portal:
 
 external_components:
-  - source: components
-    components: [ fbot ]
+  - source: github://dandwhelan/esp-fbot
+    refresh: 0s
+    components: [ fbot ]]
 
 # --- GLOBALS ---
 globals:
