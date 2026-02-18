@@ -47,9 +47,9 @@ wifi:
 captive_portal:
 
 external_components:
-  - source: github://dandwhelan/esp-fbot
+  - source: github://dandwhelan/ESP-FBot
     refresh: 0s
-    components: [ fbot ]]
+    components: [ fbot ]
 
 # --- GLOBALS ---
 globals:
@@ -425,9 +425,6 @@ display:
     //  MAIN DASHBOARD  (only when BLE is connected)
     // =============================================
 
-    // --- Battery Percentage (centre circle) ---
-    it.circle(160, 105, 55, id(c_grid));
-
     // --- Charge / Discharge time estimate (above battery %) ---
     if (id(fbot_in).has_state() && id(fbot_out).has_state()) {
       float in_w = id(fbot_in).state;
@@ -440,7 +437,7 @@ display:
           else snprintf(tbuf, sizeof(tbuf), "CHG %dm", mins);
           it.print(160, 72, id(font_sm), id(c_green), TextAlign::CENTER, tbuf);
         }
-      } else if (out_w > in_w && id(fbot_remaining).has_state()) {
+      } else if (id(fbot_remaining).has_state()) {
         int mins = (int)id(fbot_remaining).state;
         if (mins > 0) {
           char tbuf[16];
