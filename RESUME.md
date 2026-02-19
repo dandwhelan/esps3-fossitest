@@ -34,7 +34,7 @@
 | :--- | :--- | :--- | :--- |
 | **Power** | 5V | Display VCC | Main Power |
 | | GND | Display GND | Ground |
-| | 3.3V | Display LED | Backlight |
+| | GPIO 15 | Display LED | Backlight (PWM Control) |
 | **SPI Bus** | GPIO 12 | Display & Touch | CLK (SCK) |
 | | GPIO 11 | Display & Touch | MOSI (SDI) |
 | | GPIO 13 | Display & Touch | MISO (SDO) |

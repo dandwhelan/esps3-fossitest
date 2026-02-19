@@ -46,6 +46,7 @@ wifi:
 
 captive_portal:
 
+
 external_components:
   - source: github://dandwhelan/ESP-FBot
     refresh: 0s
@@ -92,7 +93,7 @@ globals:
   - id: idle_timeout_secs
     type: int
     restore_value: no
-    initial_value: '60'
+    initial_value: '600'
   - id: ac_timer_start
     type: uint32_t
     restore_value: no
@@ -109,6 +110,14 @@ globals:
     type: uint32_t
     restore_value: no
     initial_value: '0'
+  - id: last_in_watts
+    type: float
+    restore_value: no
+    initial_value: '0.0'
+  - id: last_out_watts
+    type: float
+    restore_value: no
+    initial_value: '0.0'
 
 # --- INTERVALS ---
 interval:
@@ -125,22 +134,35 @@ interval:
           then:
             - component.update: tft_display
 
-  # Backlight timeout — driven by idle_timeout_secs setting
+  # Backlight timeout & Deep Sleep
   - interval: 5s
     then:
       - lambda: |-
           uint32_t timeout_ms = (uint32_t)id(idle_timeout_secs) * 1000UL;
           if (timeout_ms == 0) return;
           uint32_t idle = millis() - id(last_touch_ms);
+          
+          // Logic:
+          // 0-60s: On (State 2)
+          // 60s-Timeout: Dim (State 1)
+          // >Timeout: Deep Sleep (State 0 -> Sleep)
+
           int target = 2;
-          if (idle > timeout_ms) target = 0;
-          else if (idle > timeout_ms / 2) target = 1;
+          if (idle > timeout_ms) {
+            target = 0; 
+          } else if (idle > 60000) { // Dim after 60s
+            target = 1;
+          }
+
           if (target == id(screen_state)) return;
-          id(screen_state) = target;
+          
           if (target == 0) {
-            id(backlight_pwm).set_level(0.0f);
+            auto call = id(backlight).turn_off();
+            call.perform();
           } else if (target == 1) {
-            id(backlight_pwm).set_level(0.15f);
+            auto call = id(backlight).turn_on();
+            call.set_brightness(0.15f);
+            call.perform();
           }
 
   # Timer auto-off check
@@ -225,6 +247,8 @@ i2c:
   sda: GPIO17
   scl: GPIO18
   scan: true
+  id: bus_i2c
+  frequency: 100kHz
 
 # --- FONTS ---
 font:
@@ -403,8 +427,17 @@ display:
     // =============================================
     //  TOP STATUS BAR
     // =============================================
-    if (id(dashboard_voltage).has_state()) {
-      it.printf(5, 2, id(font_sm), id(c_white), "%.1fV", id(dashboard_voltage).state);
+    // Bluetooth Icon at (10, 12)
+    {
+      Color bt_color = id(fbot_connected).state ? Color(0, 0, 255) : id(c_grid);
+      int bx = 10;
+      int by = 12;
+      // Draw BT rune
+      it.line(bx - 3, by - 4, bx + 3, by + 2, bt_color);
+      it.line(bx + 3, by + 2, bx,     by + 5, bt_color);
+      it.line(bx,     by + 5, bx,     by - 5, bt_color);
+      it.line(bx,     by - 5, bx + 3, by - 2, bt_color);
+      it.line(bx + 3, by - 2, bx - 3, by + 4, bt_color);
     }
 
     // --- Time estimate (top centre) ---
@@ -521,7 +554,6 @@ touchscreen:
   id: my_touch
   spi_id: bus_a
   cs_pin: GPIO6
-  interrupt_pin: GPIO7
   update_interval: 50ms
   threshold: 400
   calibration:
@@ -538,21 +570,14 @@ touchscreen:
         uint32_t now = millis();
         id(last_touch_ms) = now;
         ESP_LOGD("touch", "on_touch: state=%d menu=%d", id(screen_state), (int)id(fossi_menu));
-        if (id(screen_state) == 0) {
-          // Screen off: require double-tap to wake
-          uint32_t gap = now - id(last_tap_ms);
-          if (gap > 100 && gap < 500) {
-            id(screen_state) = 2;
-            id(backlight_pwm).set_level(1.0f);
-            id(last_tap_ms) = 0;
-          } else {
-            id(last_tap_ms) = now;
-          }
-        } else if (id(screen_state) == 1) {
-          // Dim: single touch wakes
-          id(screen_state) = 2;
-          id(backlight_pwm).set_level(1.0f);
-        }
+        
+        // Always reset idle timer and force screen ON
+        id(last_touch_ms) = now;
+        id(screen_state) = 2;
+        auto call = id(backlight).turn_on();
+        call.set_brightness(1.0f);
+        call.set_transition_length(0);
+        call.perform();
 
 # --- HARDWARE: BLUETOOTH ---
 esp32_ble_tracker:
@@ -600,8 +625,47 @@ sensor:
   - platform: fbot
     fbot_id: my_fbot
     battery_level:   { name: "Battery",        id: fbot_bat }
-    input_power:     { name: "Input",          id: fbot_in }
-    total_power:     { name: "Total Output",   id: fbot_out }
+    input_power:
+      name: "Input"
+      id: fbot_in
+      on_value:
+        then:
+          - lambda: |-
+              float v = x;
+              float last = id(last_in_watts);
+              id(last_in_watts) = v;
+              if (last == 0.0) return; // Ignore first reading
+              if (abs(v - last) > 10.0 && abs(v - last) > (last * 0.5)) {
+                 // Wake screen for 10s if tracked change > 50% and > 10W
+                 if (id(screen_state) != 2) {
+                   id(screen_state) = 2;
+                   auto call = id(backlight).turn_on();
+                   call.set_brightness(1.0f);
+                   call.perform();
+                   // Set idle to 50s so it dims after 10s (since dim limit is 60s)
+                   id(last_touch_ms) = millis() - 50000; 
+                 }
+              }
+
+    output_power:
+      name: "Total Output"
+      id: fbot_out
+      on_value:
+        then:
+          - lambda: |-
+              float v = x;
+              float last = id(last_out_watts);
+              id(last_out_watts) = v;
+              if (last == 0.0) return;
+              if (abs(v - last) > 10.0 && abs(v - last) > (last * 0.5)) {
+                 if (id(screen_state) != 2) {
+                   id(screen_state) = 2;
+                   auto call = id(backlight).turn_on();
+                   call.set_brightness(1.0f);
+                   call.perform();
+                   id(last_touch_ms) = millis() - 50000;
+                 }
+              }
     time_to_full:    { name: "Time to Full",   id: fbot_time_to_full }
     remaining_time:  { name: "Remaining Time", id: fbot_remaining }
 
